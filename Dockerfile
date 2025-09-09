@@ -21,7 +21,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar código fuente
 COPY src/ ./src/
 COPY scripts/ ./scripts/
-COPY examples/ ./examples/
 
 # Crear directorios necesarios
 RUN mkdir -p logs data

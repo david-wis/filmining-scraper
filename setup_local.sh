@@ -39,8 +39,8 @@ check_docker() {
         exit 1
     fi
     
-    if ! command -v docker-compose &> /dev/null; then
-        print_error "Docker Compose no está instalado. Por favor instala Docker Compose primero."
+    if ! docker compose version &> /dev/null; then
+        print_error "Docker Compose plugin no está disponible. Por favor instala Docker Compose plugin primero."
         exit 1
     fi
     
@@ -121,7 +121,7 @@ start_database() {
     fi
     
     # Iniciar solo la base de datos
-    docker-compose up -d postgres pgadmin
+    docker compose up -d postgres pgadmin
     
     print_message "Esperando a que la base de datos esté lista..."
     sleep 10
@@ -182,28 +182,28 @@ EOF
 case "${1:-help}" in
     start)
         echo "Iniciando base de datos..."
-        docker-compose up -d postgres pgadmin
+        docker compose up -d postgres pgadmin
         echo "Base de datos iniciada."
         echo "PostgreSQL: localhost:5432"
         echo "pgAdmin: http://localhost:8080"
         ;;
     stop)
         echo "Deteniendo base de datos..."
-        docker-compose down
+        docker compose down
         echo "Base de datos detenida."
         ;;
     restart)
         echo "Reiniciando base de datos..."
-        docker-compose restart postgres pgadmin
+        docker compose restart postgres pgadmin
         echo "Base de datos reiniciada."
         ;;
     logs)
         echo "Mostrando logs de la base de datos..."
-        docker-compose logs -f postgres
+        docker compose logs -f postgres
         ;;
     status)
         echo "Estado de la base de datos:"
-        docker-compose ps
+        docker compose ps
         ;;
     help|--help|-h)
         echo "Uso: $0 [COMANDO]"

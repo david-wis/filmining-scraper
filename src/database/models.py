@@ -119,6 +119,31 @@ class Review(Base):
     def __repr__(self):
         return f"<Review(id={self.id}, author='{self.author}', movie_id={self.movie_id})>"
 
+class ImportProgress(Base):
+    """Modelo para rastrear el progreso de importaciones."""
+    __tablename__ = 'import_progress'
+    
+    id = Column(Integer, primary_key=True)
+    import_type = Column(String(50), nullable=False)  # 'popular', 'top_rated', etc.
+    endpoint = Column(String(100), nullable=False)
+    current_page = Column(Integer, nullable=False, default=1)
+    total_pages = Column(Integer)
+    total_movies = Column(Integer, default=0)
+    movies_processed = Column(Integer, default=0)
+    movies_new = Column(Integer, default=0)
+    movies_updated = Column(Integer, default=0)
+    errors_count = Column(Integer, default=0)
+    status = Column(String(20), nullable=False, default='running')  # 'running', 'completed', 'failed', 'paused'
+    started_at = Column(DateTime, default=func.now())
+    last_updated = Column(DateTime, default=func.now(), onupdate=func.now())
+    completed_at = Column(DateTime)
+    error_message = Column(Text)
+    config_snapshot = Column(Text)  # JSON como string
+    estimated_completion = Column(DateTime)
+    
+    def __repr__(self):
+        return f"<ImportProgress(id={self.id}, type='{self.import_type}', page={self.current_page}/{self.total_pages}, status='{self.status}')>"
+
 # Índices adicionales para optimizar consultas
 from sqlalchemy import Index
 
@@ -129,3 +154,8 @@ Index('idx_movies_popularity', Movie.popularity)
 Index('idx_movies_vote_average', Movie.vote_average)
 Index('idx_credits_person_id', Credit.tmdb_person_id)
 Index('idx_keywords_name', Keyword.name)
+
+# Índices para import_progress
+Index('idx_import_progress_type', ImportProgress.import_type)
+Index('idx_import_progress_status', ImportProgress.status)
+Index('idx_import_progress_started_at', ImportProgress.started_at)

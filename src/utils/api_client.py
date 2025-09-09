@@ -5,7 +5,7 @@ from loguru import logger
 from src.config import Config
 
 class TMDBAPIClient:
-    """Cliente para interactuar con la API de TMDB."""
+    """Cliente para interactuar con la API de TMDB con reintentos automáticos."""
     
     def __init__(self):
         self.base_url = Config.TMDB_BASE_URL
@@ -19,6 +19,11 @@ class TMDBAPIClient:
         self.last_request_time = 0
         self.min_request_interval = 0.25  # 250ms entre requests
         
+        # Configuración de reintentos
+        self.max_retries = 3
+        self.retry_delay = 1  # segundos
+        self.backoff_factor = 2
+        
     def _rate_limit(self):
         """Implementa rate limiting para evitar exceder límites de la API."""
         current_time = time.time()
@@ -31,9 +36,7 @@ class TMDBAPIClient:
         self.last_request_time = time.time()
     
     def _make_request(self, endpoint: str, params: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
-        """Realiza una petición a la API de TMDB."""
-        self._rate_limit()
-        
+        """Realiza una petición a la API de TMDB con reintentos automáticos."""
         url = f"{self.base_url}/{endpoint}"
         params = params or {}
         params.update({
@@ -42,19 +45,48 @@ class TMDBAPIClient:
             'region': Config.REGION
         })
         
-        try:
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
+        last_exception = None
+        
+        for attempt in range(self.max_retries + 1):
+            try:
+                self._rate_limit()
+                
+                response = self.session.get(url, params=params, timeout=30)
+                response.raise_for_status()
+                
+                logger.debug(f"API Request: {endpoint} - Status: {response.status_code} (attempt {attempt + 1})")
+                return response.json()
+                
+            except requests.exceptions.Timeout as e:
+                last_exception = e
+                logger.warning(f"Timeout en petición API {endpoint} (attempt {attempt + 1}/{self.max_retries + 1})")
+                
+            except requests.exceptions.ConnectionError as e:
+                last_exception = e
+                logger.warning(f"Error de conexión en API {endpoint} (attempt {attempt + 1}/{self.max_retries + 1})")
+                
+            except requests.exceptions.HTTPError as e:
+                # Para errores HTTP específicos, no reintentar
+                if e.response.status_code in [400, 401, 403, 404]:
+                    logger.error(f"Error HTTP no recuperable en API {endpoint}: {e.response.status_code}")
+                    return None
+                
+                last_exception = e
+                logger.warning(f"Error HTTP en API {endpoint} (attempt {attempt + 1}/{self.max_retries + 1}): {e.response.status_code}")
+                
+            except requests.exceptions.RequestException as e:
+                last_exception = e
+                logger.warning(f"Error en petición API {endpoint} (attempt {attempt + 1}/{self.max_retries + 1}): {str(e)}")
             
-            logger.debug(f"API Request: {endpoint} - Status: {response.status_code}")
-            return response.json()
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error en petición API {endpoint}: {str(e)}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Response status: {e.response.status_code}")
-                logger.error(f"Response content: {e.response.text}")
-            return None
+            # Esperar antes del siguiente intento
+            if attempt < self.max_retries:
+                delay = self.retry_delay * (self.backoff_factor ** attempt)
+                logger.info(f"Esperando {delay} segundos antes del siguiente intento...")
+                time.sleep(delay)
+        
+        # Si llegamos aquí, todos los intentos fallaron
+        logger.error(f"Error final en petición API {endpoint} después de {self.max_retries + 1} intentos: {str(last_exception)}")
+        return None
     
     def get_popular_movies(self, page: int = 1) -> Optional[Dict[str, Any]]:
         """Obtiene películas populares."""

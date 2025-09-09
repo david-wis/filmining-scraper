@@ -56,10 +56,13 @@ cp env.example .env
 
 4. Ejecuta el recolector:
 ```bash
-./scripts/docker-setup.sh run-collector --init-db --popular --max-pages 10
-```
+# Opción A: Solo base de datos (ejecutas Python localmente)
+./scripts/docker-setup.sh start-db
+python src/main.py --init-db --popular --max-pages 10
 
-**Para más detalles sobre Docker, consulta [DOCKER.md](DOCKER.md)**
+# Opción B: Todo en Docker
+./scripts/docker-setup.sh run-collector-custom --init-db --popular --max-pages 10
+```
 
 ## Configuración
 
@@ -80,14 +83,14 @@ cp env.example .env
 # Iniciar base de datos
 ./scripts/docker-setup.sh start-db
 
-# Ejecutar recolector principal
-./scripts/docker-setup.sh run-collector --init-db --popular
+# Ejecutar recolector principal (todo en Docker)
+./scripts/docker-setup.sh run-collector-custom --init-db --popular
 
 # Recolectar solo géneros
-./scripts/docker-setup.sh run-collector --genres-only
+./scripts/docker-setup.sh run-collector-custom --genres-only
 
 # Recolectar películas populares
-./scripts/docker-setup.sh run-collector --popular --max-pages 10
+./scripts/docker-setup.sh run-collector-custom --popular --max-pages 10
 
 # Ver estado de contenedores
 ./scripts/docker-setup.sh status
@@ -132,8 +135,7 @@ python src/collectors/movie_collector.py
 │   └── init.sql               # Script de inicialización de BD
 ├── logs/                      # Archivos de log
 ├── data/                      # Datos exportados
-├── docker-compose.yml         # Configuración Docker (producción)
-├── docker-compose.dev.yml     # Configuración Docker (desarrollo)
+├── docker-compose.yml         # Configuración Docker
 ├── Dockerfile                 # Imagen de la aplicación
 ├── requirements.txt           # Dependencias de Python
 ├── requirements-analysis.txt  # Dependencias para análisis

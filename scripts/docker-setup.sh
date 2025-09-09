@@ -37,8 +37,8 @@ check_docker() {
         exit 1
     fi
     
-    if ! command -v docker-compose &> /dev/null; then
-        print_error "Docker Compose no está instalado. Por favor instala Docker Compose primero."
+    if ! docker compose version &> /dev/null; then
+        print_error "Docker Compose plugin no está disponible. Por favor instala Docker Compose plugin primero."
         exit 1
     fi
     
@@ -61,7 +61,7 @@ check_env_file() {
 # Función para iniciar solo la base de datos
 start_database() {
     print_message "Iniciando base de datos PostgreSQL..."
-    docker-compose up -d postgres pgadmin
+    docker compose up -d postgres pgadmin
     
     print_message "Esperando a que la base de datos esté lista..."
     sleep 10
@@ -76,27 +76,27 @@ start_database() {
 # Función para detener la base de datos
 stop_database() {
     print_message "Deteniendo base de datos..."
-    docker-compose down
+    docker compose down
     print_message "Base de datos detenida."
 }
 
 # Función para reiniciar la base de datos
 restart_database() {
     print_message "Reiniciando base de datos..."
-    docker-compose restart postgres pgadmin
+    docker compose restart postgres pgadmin
     print_message "Base de datos reiniciada."
 }
 
 # Función para ver logs de la base de datos
 logs_database() {
     print_message "Mostrando logs de la base de datos..."
-    docker-compose logs -f postgres
+    docker compose logs -f postgres
 }
 
-# Función para ejecutar el recolector en modo desarrollo
-run_collector_dev() {
-    print_message "Ejecutando recolector en modo desarrollo..."
-    docker-compose -f docker-compose.dev.yml up --build movie-collector
+# Función para ejecutar el recolector
+run_collector() {
+    print_message "Ejecutando recolector..."
+    docker compose --profile collector up --build movie-collector
 }
 
 # Función para ejecutar el recolector con argumentos personalizados
@@ -105,13 +105,13 @@ run_collector_custom() {
     if [ -z "$args" ]; then
         print_error "Debes proporcionar argumentos para el recolector."
         print_message "Ejemplos:"
-        print_message "  $0 run-collector --init-db --popular --max-pages 10"
-        print_message "  $0 run-collector --genres-only"
+        print_message "  $0 run-collector-custom --init-db --popular --max-pages 10"
+        print_message "  $0 run-collector-custom --genres-only"
         exit 1
     fi
     
     print_message "Ejecutando recolector con argumentos: $args"
-    docker-compose -f docker-compose.dev.yml run --rm movie-collector python src/main.py $args
+    docker compose run --rm movie-collector python src/main.py $args
 }
 
 # Función para limpiar todo
@@ -121,8 +121,7 @@ cleanup() {
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         print_message "Limpiando todo..."
-        docker-compose down -v --remove-orphans
-        docker-compose -f docker-compose.dev.yml down -v --remove-orphans
+        docker compose down -v --remove-orphans
         docker system prune -f
         print_message "Limpieza completada."
     else
@@ -133,7 +132,7 @@ cleanup() {
 # Función para mostrar el estado
 status() {
     print_message "Estado de los contenedores:"
-    docker-compose ps
+    docker compose ps
     
     echo
     print_message "Volúmenes:"
@@ -155,16 +154,16 @@ show_help() {
     echo "  stop-db           - Detener la base de datos"
     echo "  restart-db        - Reiniciar la base de datos"
     echo "  logs-db           - Mostrar logs de la base de datos"
-    echo "  run-dev           - Ejecutar recolector en modo desarrollo"
-    echo "  run-collector     - Ejecutar recolector con argumentos personalizados"
+    echo "  run-collector     - Ejecutar recolector"
+    echo "  run-collector-custom - Ejecutar recolector con argumentos personalizados"
     echo "  status            - Mostrar estado de contenedores"
     echo "  cleanup           - Limpiar todo (contenedores, volúmenes, datos)"
     echo "  help              - Mostrar esta ayuda"
     echo
     echo "Ejemplos:"
     echo "  $0 start-db"
-    echo "  $0 run-collector --init-db --popular --max-pages 10"
-    echo "  $0 run-collector --genres-only"
+    echo "  $0 run-collector-custom --init-db --popular --max-pages 10"
+    echo "  $0 run-collector-custom --genres-only"
     echo "  $0 status"
 }
 
@@ -188,12 +187,12 @@ main() {
             check_docker
             logs_database
             ;;
-        run-dev)
+        run-collector)
             check_docker
             check_env_file
-            run_collector_dev
+            run_collector
             ;;
-        run-collector)
+        run-collector-custom)
             check_docker
             check_env_file
             shift

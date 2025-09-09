@@ -30,6 +30,8 @@ services:
     container_name: tmdb_pgadmin
     restart: unless-stopped
     environment:
+      PGADMIN_DEFAULT_EMAIL: admin@tmdb.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
       PGADMIN_CONFIG_SERVER_MODE: 'False'
       PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
     ports:
@@ -41,6 +43,41 @@ services:
         condition: service_healthy
     networks:
       - movie_network
+
+  movie-collector:
+    build: .
+    container_name: tmdb_collector
+    restart: "no"
+    environment:
+      - TMDB_API_KEY=${TMDB_API_KEY}
+      - TMDB_BASE_URL=${TMDB_BASE_URL}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=movie_database
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - BATCH_SIZE=${BATCH_SIZE:-20}
+      - MAX_PAGES=${MAX_PAGES:-500}
+      - LANGUAGE=${LANGUAGE:-en-US}
+      - REGION=${REGION:-US}
+      - COLLECT_MOVIES=${COLLECT_MOVIES:-true}
+      - COLLECT_GENRES=${COLLECT_GENRES:-true}
+      - COLLECT_CREDITS=${COLLECT_CREDITS:-true}
+      - COLLECT_KEYWORDS=${COLLECT_KEYWORDS:-true}
+      - COLLECT_REVIEWS=${COLLECT_REVIEWS:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=logs/movie_collector.log
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - movie_network
+    profiles:
+      - collector
 
 volumes:
   postgres_data:

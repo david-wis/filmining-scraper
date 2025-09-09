@@ -7,16 +7,19 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from src.utils.api_client import TMDBAPIClient
+from src.utils.progress_manager import ProgressManager
 from src.database.connection import get_db_session
 from src.database.models import Movie, Genre, Credit, Keyword
 from src.config import Config
 
 class MovieCollector:
-    """Recolector de películas desde TMDB API."""
+    """Recolector de películas desde TMDB API con soporte para importación progresiva."""
     
     def __init__(self):
         self.api_client = TMDBAPIClient()
+        self.progress_manager = ProgressManager()
         self.logger = logger.bind(name="MovieCollector")
+        self.checkpoint_interval = 5  # Guardar progreso cada 5 páginas
     
     def collect_popular_movies(self, max_pages: int = None) -> bool:
         """Recolecta películas populares."""
@@ -35,88 +38,162 @@ class MovieCollector:
         return self._collect_movies_from_endpoint("upcoming", max_pages)
     
     def _collect_movies_from_endpoint(self, endpoint: str, max_pages: int = None) -> bool:
-        """Recolecta películas desde un endpoint específico."""
+        """Recolecta películas desde un endpoint específico con soporte para reanudación."""
         max_pages = max_pages or Config.MAX_PAGES
         self.logger.info(f"Iniciando recolección de películas desde endpoint: {endpoint}")
         
-        total_movies = 0
-        page = 1
-        
         try:
-            while page <= max_pages:
-                self.logger.info(f"Procesando página {page} de {endpoint}")
+            # Iniciar o reanudar importación
+            progress = self.progress_manager.start_import(endpoint, endpoint, max_pages)
+            start_page = progress.current_page
+            
+            self.logger.info(f"Procesando desde página {start_page} hasta {max_pages}")
+            
+            total_movies = 0
+            total_new = 0
+            total_updated = 0
+            total_errors = 0
+            
+            # Crear barra de progreso
+            with tqdm(total=max_pages, initial=start_page-1, desc=f"Recolectando {endpoint}") as pbar:
+                page = start_page
                 
-                # Obtener películas de la página actual
-                if endpoint == "popular":
-                    movies_data = self.api_client.get_popular_movies(page)
-                elif endpoint == "top_rated":
-                    movies_data = self.api_client.get_top_rated_movies(page)
-                elif endpoint == "now_playing":
-                    movies_data = self.api_client.get_now_playing_movies(page)
-                elif endpoint == "upcoming":
-                    movies_data = self.api_client.get_upcoming_movies(page)
-                else:
-                    self.logger.error(f"Endpoint no soportado: {endpoint}")
-                    return False
-                
-                if not movies_data or 'results' not in movies_data:
-                    self.logger.warning(f"No se obtuvieron datos para la página {page}")
-                    break
-                
-                movies = movies_data['results']
-                if not movies:
-                    self.logger.info(f"No hay más películas en la página {page}")
-                    break
-                
-                # Procesar películas en lotes
-                batch_count = self._process_movie_batch(movies)
-                total_movies += batch_count
-                
-                self.logger.info(f"Página {page} procesada: {batch_count} películas")
-                
-                # Verificar si hay más páginas
-                if page >= movies_data.get('total_pages', 1):
-                    break
-                
-                page += 1
+                while page <= max_pages:
+                    try:
+                        # Mostrar progreso actual
+                        summary = self.progress_manager.get_progress_summary()
+                        pbar.set_postfix({
+                            'Movies': total_movies,
+                            'New': total_new,
+                            'Updated': total_updated,
+                            'Errors': total_errors
+                        })
+                        
+                        self.logger.info(f"Procesando página {page}/{max_pages} de {endpoint}")
+                        
+                        # Obtener películas de la página actual
+                        movies_data = self._get_movies_data(endpoint, page)
+                        
+                        if not movies_data or 'results' not in movies_data:
+                            self.logger.warning(f"No se obtuvieron datos para la página {page}")
+                            total_errors += 1
+                            page += 1
+                            continue
+                        
+                        movies = movies_data['results']
+                        if not movies:
+                            self.logger.info(f"No hay más películas en la página {page}")
+                            break
+                        
+                        # Procesar películas en lotes
+                        batch_stats = self._process_movie_batch(movies)
+                        total_movies += batch_stats['processed']
+                        total_new += batch_stats['new']
+                        total_updated += batch_stats['updated']
+                        total_errors += batch_stats['errors']
+                        
+                        # Actualizar progreso
+                        self.progress_manager.update_progress(
+                            page=page + 1,
+                            movies_processed=batch_stats['processed'],
+                            movies_new=batch_stats['new'],
+                            movies_updated=batch_stats['updated'],
+                            errors_count=batch_stats['errors']
+                        )
+                        
+                        self.logger.info(f"Página {page} procesada: {batch_stats['processed']} películas "
+                                       f"(Nuevas: {batch_stats['new']}, Actualizadas: {batch_stats['updated']}, "
+                                       f"Errores: {batch_stats['errors']})")
+                        
+                        # Checkpoint cada N páginas
+                        if page % self.checkpoint_interval == 0:
+                            self.logger.info(f"Checkpoint guardado en página {page}")
+                        
+                        # Verificar si hay más páginas
+                        if page >= movies_data.get('total_pages', 1):
+                            break
+                        
+                        page += 1
+                        pbar.update(1)
+                        
+                    except Exception as e:
+                        self.logger.error(f"Error procesando página {page}: {str(e)}")
+                        total_errors += 1
+                        page += 1
+                        continue
+            
+            # Completar importación
+            self.progress_manager.complete_import(success=True)
             
             self.logger.info(f"Recolección completada: {total_movies} películas procesadas desde {endpoint}")
+            self.logger.info(f"Resumen: Nuevas: {total_new}, Actualizadas: {total_updated}, Errores: {total_errors}")
             return True
             
         except Exception as e:
             self.logger.error(f"Error recolectando películas desde {endpoint}: {str(e)}")
+            self.progress_manager.complete_import(success=False, error_message=str(e))
             return False
+        finally:
+            self.progress_manager.close()
     
-    def _process_movie_batch(self, movies: List[Dict[str, Any]]) -> int:
-        """Procesa un lote de películas."""
-        processed_count = 0
+    def _get_movies_data(self, endpoint: str, page: int) -> Optional[Dict[str, Any]]:
+        """Obtiene datos de películas desde un endpoint específico."""
+        if endpoint == "popular":
+            return self.api_client.get_popular_movies(page)
+        elif endpoint == "top_rated":
+            return self.api_client.get_top_rated_movies(page)
+        elif endpoint == "now_playing":
+            return self.api_client.get_now_playing_movies(page)
+        elif endpoint == "upcoming":
+            return self.api_client.get_upcoming_movies(page)
+        else:
+            self.logger.error(f"Endpoint no soportado: {endpoint}")
+            return None
+    
+    def _process_movie_batch(self, movies: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Procesa un lote de películas y retorna estadísticas detalladas."""
+        stats = {
+            'processed': 0,
+            'new': 0,
+            'updated': 0,
+            'errors': 0
+        }
         
-        for movie_data in tqdm(movies, desc="Procesando películas"):
+        for movie_data in tqdm(movies, desc="Procesando películas", leave=False):
             try:
                 # Obtener detalles completos de la película
                 movie_details = self.api_client.get_movie_details(movie_data['id'])
                 
                 if movie_details:
                     # Guardar película con todos sus datos relacionados
-                    success = self._save_movie_with_details(movie_details)
-                    if success:
-                        processed_count += 1
+                    result = self._save_movie_with_details(movie_details)
+                    if result['success']:
+                        stats['processed'] += 1
+                        if result['is_new']:
+                            stats['new'] += 1
+                        else:
+                            stats['updated'] += 1
+                    else:
+                        stats['errors'] += 1
                 else:
                     self.logger.warning(f"No se pudieron obtener detalles para la película {movie_data.get('title', 'Unknown')}")
+                    stats['errors'] += 1
                     
             except Exception as e:
                 self.logger.error(f"Error procesando película {movie_data.get('title', 'Unknown')}: {str(e)}")
+                stats['errors'] += 1
                 continue
         
-        return processed_count
+        return stats
     
-    def _save_movie_with_details(self, movie_data: Dict[str, Any]) -> bool:
+    def _save_movie_with_details(self, movie_data: Dict[str, Any]) -> Dict[str, Any]:
         """Guarda una película con todos sus detalles relacionados."""
         session = get_db_session()
         
         try:
             # Verificar si la película ya existe
             existing_movie = session.query(Movie).filter_by(tmdb_id=movie_data['id']).first()
+            is_new = existing_movie is None
             
             if existing_movie:
                 # Actualizar película existente
@@ -144,16 +221,16 @@ class MovieCollector:
                 self._save_movie_keywords(session, movie, movie_data['keywords'])
             
             session.commit()
-            return True
+            return {'success': True, 'is_new': is_new}
             
         except IntegrityError as e:
             self.logger.warning(f"Error de integridad al guardar película {movie_data.get('title', 'Unknown')}: {str(e)}")
             session.rollback()
-            return False
+            return {'success': False, 'is_new': False}
         except Exception as e:
             self.logger.error(f"Error guardando película {movie_data.get('title', 'Unknown')}: {str(e)}")
             session.rollback()
-            return False
+            return {'success': False, 'is_new': False}
         finally:
             session.close()
     
