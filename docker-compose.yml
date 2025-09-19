@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     container_name: tmdb_movie_db
     restart: unless-stopped
     environment:
@@ -12,7 +12,7 @@ services:
       POSTGRES_HOST_AUTH_METHOD: trust
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=en_US.UTF-8 --lc-ctype=en_US.UTF-8"
     ports:
-      - "5432:5432"
+      - "25432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
