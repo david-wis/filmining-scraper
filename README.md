@@ -1,5 +1,12 @@
 # TMDB Movie Data Collector
 
+## Integrantes
+
+- Wischñevsky David
+- Vilamowski Abril
+- Liu Jonathan
+
+
 Un proyecto para recolectar datos de películas de la API de TMDB y almacenarlos en una base de datos para análisis de datos y data science.
 
 ## Características
