@@ -68,7 +68,7 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.selectbox(
         "Choose a page:",
-        ["🏠 Home", "🔮 Predict ROI", "📊 Data Analysis", "🤖 Model Training", "📈 Model Performance"]
+        ["🏠 Home", "🔮 Predict ROI", "📊 Data Analysis", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis"]
     )
     
     # Database connection check
@@ -106,6 +106,8 @@ def main():
         show_model_training_page(df_clean)
     elif page == "📈 Model Performance":
         show_model_performance_page()
+    elif page == "🔬 Sensitivity Analysis":
+        show_sensitivity_analysis_page(df_clean, df_genres)
 
 
 def show_home_page(data_summary, df_clean):
@@ -198,7 +200,7 @@ def show_home_page(data_summary, df_clean):
     3. **🤖 Model Training**: Train or retrain the Random Forest model with different parameters
     4. **📈 Model Performance**: View model metrics and feature importance
     
-    The model uses features like budget, runtime, genres, country, language, and ratings to predict ROI.
+    The model uses features like budget, runtime, genres, country, and language to predict ROI.
     """)
 
 
@@ -223,10 +225,6 @@ def show_prediction_page(df_clean, df_genres):
         budget = st.number_input("Budget (USD)", min_value=100000, max_value=500000000, value=10000000, step=1000000)
         runtime = st.number_input("Runtime (minutes)", min_value=60, max_value=300, value=120, step=5)
         
-        # Release information
-        release_year = st.number_input("Release Year", min_value=1900, max_value=2030, value=2024)
-        release_month = st.selectbox("Release Month", range(1, 13), index=0)
-        
         # Language and country
         languages = df_clean['original_language'].value_counts().head(10).index.tolist()
         original_language = st.selectbox("Original Language", languages)
@@ -235,17 +233,13 @@ def show_prediction_page(df_clean, df_genres):
         main_country = st.selectbox("Main Country", countries)
         
     with col2:
-        # Ratings and content
-        st.subheader("⭐ Ratings & Content")
-        
-        vote_average = st.slider("Vote Average (0-10)", min_value=0.0, max_value=10.0, value=6.0, step=0.1)
-        vote_count = st.number_input("Vote Count", min_value=0, max_value=50000, value=1000, step=100)
+        # Content and genres
+        st.subheader("🎭 Content")
         
         adult = st.checkbox("Adult Content", value=False)
-        status = st.selectbox("Status", ["Released", "Post Production", "In Production", "Planned"])
         
         # Genres
-        st.subheader("🎭 Genres")
+        st.subheader("� Genres")
         all_genres = df_genres['name'].tolist() if df_genres is not None else []
         selected_genres = st.multiselect("Select Genres", all_genres, default=["Drama"])
     
@@ -257,13 +251,13 @@ def show_prediction_page(df_clean, df_genres):
             'title': title,
             'budget': budget,
             'runtime': runtime,
-            'release_date': f"{release_year}-{release_month:02d}-01",
+            'release_date': '2024-01-01',  # Placeholder - not used in features
             'original_language': original_language,
             'main_country': main_country,
-            'vote_average': vote_average,
-            'vote_count': vote_count,
+            'vote_average': 0,  # Not used in prediction
+            'vote_count': 0,  # Not used in prediction
             'adult': adult,
-            'status': status,
+            'status': 'Released',  # Not used in prediction
             'genres': ', '.join(selected_genres),
             'production_countries': f'[{{"name": "{main_country}"}}]'
         }
@@ -672,6 +666,342 @@ def show_model_performance_page():
             
         except Exception as e:
             st.error(f"❌ Error loading model: {str(e)}")
+
+
+def show_sensitivity_analysis_page(df_clean, df_genres):
+    """Display sensitivity analysis page showing how ROI changes with individual features."""
+    
+    st.header("🔬 Sensitivity Analysis")
+    
+    if not st.session_state.model_trainer.is_trained:
+        st.warning("⚠️ Model not trained yet. Please train the model first in the 'Model Training' page.")
+        return
+    
+    st.markdown("""
+    This page shows how predicted ROI changes when varying individual features while keeping others constant.
+    This helps understand which factors have the most impact on ROI predictions.
+    """)
+    
+    # Get baseline values from user
+    st.subheader("📝 Baseline Movie Configuration")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        baseline_budget = st.number_input("Baseline Budget (USD)", min_value=100000, max_value=500000000, value=10000000, step=1000000)
+        baseline_runtime = st.number_input("Baseline Runtime (minutes)", min_value=60, max_value=300, value=120, step=5)
+        
+        languages = df_clean['original_language'].value_counts().head(10).index.tolist()
+        baseline_language = st.selectbox("Baseline Language", languages, index=0 if 'en' not in languages else languages.index('en'))
+        
+    with col2:
+        countries = df_clean['main_country'].value_counts().head(10).index.tolist()
+        baseline_country = st.selectbox("Baseline Country", countries)
+        
+        baseline_adult = st.checkbox("Baseline Adult Content", value=False)
+        
+        all_genres = df_genres['name'].tolist() if df_genres is not None else []
+        baseline_genres = st.multiselect("Baseline Genres", all_genres, default=["Drama"])
+    
+    # Create baseline movie data
+    baseline_movie = {
+        'title': 'Baseline Movie',
+        'budget': baseline_budget,
+        'runtime': baseline_runtime,
+        'release_date': '2024-01-01',
+        'original_language': baseline_language,
+        'main_country': baseline_country,
+        'vote_average': 0,
+        'vote_count': 0,
+        'adult': baseline_adult,
+        'status': 'Released',
+        'genres': ', '.join(baseline_genres),
+        'production_countries': f'[{{"name": "{baseline_country}"}}]'
+    }
+    
+    # Analysis type selection
+    st.subheader("📊 Select Analysis Type")
+    
+    analysis_tabs = st.tabs(["💰 Budget Impact", "⏱️ Runtime Impact", "🌍 Country Impact", "🗣️ Language Impact", "🎭 Genre Impact"])
+    
+    # Budget Analysis
+    with analysis_tabs[0]:
+        st.markdown("### How ROI changes with different budgets")
+        
+        # Show fixed values
+        with st.expander("📌 Fixed Baseline Values", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"**Runtime:** {baseline_runtime} minutes")
+                st.write(f"**Language:** {baseline_language}")
+                st.write(f"**Country:** {baseline_country}")
+            with col2:
+                st.write(f"**Adult Content:** {baseline_adult}")
+                st.write(f"**Genres:** {', '.join(baseline_genres)}")
+        
+        # Generate budget range
+        budget_min = st.number_input("Min Budget", min_value=100000, value=1000000, step=100000, key="budget_min")
+        budget_max = st.number_input("Max Budget", min_value=budget_min, value=100000000, step=1000000, key="budget_max")
+        budget_steps = st.slider("Number of points", min_value=10, max_value=100, value=50, key="budget_steps")
+        
+        budgets = np.linspace(budget_min, budget_max, budget_steps)
+        roi_predictions = []
+        
+        with st.spinner("Calculating predictions..."):
+            for budget in budgets:
+                movie = baseline_movie.copy()
+                movie['budget'] = budget
+                
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                    roi_predictions.append(predicted_roi)
+                except Exception as e:
+                    st.error(f"Error predicting for budget {budget}: {str(e)}")
+                    roi_predictions.append(None)
+        
+        # Plot
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=budgets, y=roi_predictions, mode='lines+markers', name='Predicted ROI'))
+        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.update_layout(
+            title="ROI vs Budget",
+            xaxis_title="Budget (USD)",
+            yaxis_title="Predicted ROI",
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Summary statistics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Min ROI", f"{min(roi_predictions):.2f}")
+        with col2:
+            st.metric("Max ROI", f"{max(roi_predictions):.2f}")
+        with col3:
+            st.metric("ROI Range", f"{max(roi_predictions) - min(roi_predictions):.2f}")
+    
+    # Runtime Analysis
+    with analysis_tabs[1]:
+        st.markdown("### How ROI changes with different runtimes")
+        
+        # Show fixed values
+        with st.expander("📌 Fixed Baseline Values", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"**Budget:** ${baseline_budget:,.0f}")
+                st.write(f"**Language:** {baseline_language}")
+                st.write(f"**Country:** {baseline_country}")
+            with col2:
+                st.write(f"**Adult Content:** {baseline_adult}")
+                st.write(f"**Genres:** {', '.join(baseline_genres)}")
+        
+        runtime_min = st.number_input("Min Runtime (minutes)", min_value=60, value=80, step=5, key="runtime_min")
+        runtime_max = st.number_input("Max Runtime (minutes)", min_value=runtime_min, value=180, step=5, key="runtime_max")
+        runtime_steps = st.slider("Number of points", min_value=10, max_value=50, value=25, key="runtime_steps")
+        
+        runtimes = np.linspace(runtime_min, runtime_max, runtime_steps)
+        roi_predictions = []
+        
+        with st.spinner("Calculating predictions..."):
+            for runtime in runtimes:
+                movie = baseline_movie.copy()
+                movie['runtime'] = int(runtime)
+                
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                    roi_predictions.append(predicted_roi)
+                except Exception as e:
+                    st.error(f"Error predicting for runtime {runtime}: {str(e)}")
+                    roi_predictions.append(None)
+        
+        # Plot
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=runtimes, y=roi_predictions, mode='lines+markers', name='Predicted ROI'))
+        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.update_layout(
+            title="ROI vs Runtime",
+            xaxis_title="Runtime (minutes)",
+            yaxis_title="Predicted ROI",
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Summary statistics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Min ROI", f"{min(roi_predictions):.2f}")
+        with col2:
+            st.metric("Max ROI", f"{max(roi_predictions):.2f}")
+        with col3:
+            st.metric("ROI Range", f"{max(roi_predictions) - min(roi_predictions):.2f}")
+    
+    # Country Analysis
+    with analysis_tabs[2]:
+        st.markdown("### How ROI changes across different countries")
+        
+        # Show fixed values
+        with st.expander("📌 Fixed Baseline Values", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"**Budget:** ${baseline_budget:,.0f}")
+                st.write(f"**Runtime:** {baseline_runtime} minutes")
+                st.write(f"**Language:** {baseline_language}")
+            with col2:
+                st.write(f"**Adult Content:** {baseline_adult}")
+                st.write(f"**Genres:** {', '.join(baseline_genres)}")
+        
+        top_n_countries = st.slider("Number of top countries to analyze", min_value=5, max_value=20, value=10, key="country_n")
+        countries = df_clean['main_country'].value_counts().head(top_n_countries).index.tolist()
+        
+        roi_predictions = []
+        
+        with st.spinner("Calculating predictions..."):
+            for country in countries:
+                movie = baseline_movie.copy()
+                movie['main_country'] = country
+                movie['production_countries'] = f'[{{"name": "{country}"}}]'
+                
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                    roi_predictions.append(predicted_roi)
+                except Exception as e:
+                    st.error(f"Error predicting for country {country}: {str(e)}")
+                    roi_predictions.append(None)
+        
+        # Plot
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=countries, y=roi_predictions, name='Predicted ROI'))
+        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.update_layout(
+            title="ROI by Production Country",
+            xaxis_title="Country",
+            yaxis_title="Predicted ROI",
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Best and worst
+        country_roi_df = pd.DataFrame({'Country': countries, 'ROI': roi_predictions}).sort_values('ROI', ascending=False)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Top 5 Countries by ROI**")
+            st.dataframe(country_roi_df.head(5), use_container_width=True)
+        with col2:
+            st.markdown("**Bottom 5 Countries by ROI**")
+            st.dataframe(country_roi_df.tail(5), use_container_width=True)
+    
+    # Language Analysis
+    with analysis_tabs[3]:
+        st.markdown("### How ROI changes across different languages")
+        
+        # Show fixed values
+        with st.expander("📌 Fixed Baseline Values", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"**Budget:** ${baseline_budget:,.0f}")
+                st.write(f"**Runtime:** {baseline_runtime} minutes")
+                st.write(f"**Country:** {baseline_country}")
+            with col2:
+                st.write(f"**Adult Content:** {baseline_adult}")
+                st.write(f"**Genres:** {', '.join(baseline_genres)}")
+        
+        top_n_languages = st.slider("Number of top languages to analyze", min_value=5, max_value=15, value=10, key="language_n")
+        languages_list = df_clean['original_language'].value_counts().head(top_n_languages).index.tolist()
+        
+        roi_predictions = []
+        
+        with st.spinner("Calculating predictions..."):
+            for lang in languages_list:
+                movie = baseline_movie.copy()
+                movie['original_language'] = lang
+                
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                    roi_predictions.append(predicted_roi)
+                except Exception as e:
+                    st.error(f"Error predicting for language {lang}: {str(e)}")
+                    roi_predictions.append(None)
+        
+        # Plot
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=languages_list, y=roi_predictions, name='Predicted ROI'))
+        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.update_layout(
+            title="ROI by Original Language",
+            xaxis_title="Language",
+            yaxis_title="Predicted ROI",
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Best and worst
+        language_roi_df = pd.DataFrame({'Language': languages_list, 'ROI': roi_predictions}).sort_values('ROI', ascending=False)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Top 5 Languages by ROI**")
+            st.dataframe(language_roi_df.head(5), use_container_width=True)
+        with col2:
+            st.markdown("**Bottom 5 Languages by ROI**")
+            st.dataframe(language_roi_df.tail(5), use_container_width=True)
+    
+    # Genre Analysis
+    with analysis_tabs[4]:
+        st.markdown("### How ROI changes with individual genres")
+        
+        st.info("This analysis shows ROI when adding each genre individually to the baseline configuration.")
+        
+        # Show fixed values
+        with st.expander("📌 Fixed Baseline Values", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"**Budget:** ${baseline_budget:,.0f}")
+                st.write(f"**Runtime:** {baseline_runtime} minutes")
+                st.write(f"**Language:** {baseline_language}")
+            with col2:
+                st.write(f"**Country:** {baseline_country}")
+                st.write(f"**Adult Content:** {baseline_adult}")
+        
+        genres_to_test = all_genres if all_genres else []
+        roi_predictions = []
+        
+        with st.spinner("Calculating predictions..."):
+            for genre in genres_to_test:
+                movie = baseline_movie.copy()
+                movie['genres'] = genre  # Single genre
+                
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                    roi_predictions.append(predicted_roi)
+                except Exception as e:
+                    roi_predictions.append(None)
+        
+        # Plot
+        genre_roi_df = pd.DataFrame({'Genre': genres_to_test, 'ROI': roi_predictions}).sort_values('ROI', ascending=False)
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=genre_roi_df['Genre'], y=genre_roi_df['ROI'], name='Predicted ROI'))
+        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.update_layout(
+            title="ROI by Genre (Individual)",
+            xaxis_title="Genre",
+            yaxis_title="Predicted ROI",
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Best and worst
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Top 5 Genres by ROI**")
+            st.dataframe(genre_roi_df.head(5), use_container_width=True)
+        with col2:
+            st.markdown("**Bottom 5 Genres by ROI**")
+            st.dataframe(genre_roi_df.tail(5), use_container_width=True)
 
 
 if __name__ == "__main__":

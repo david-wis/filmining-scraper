@@ -126,11 +126,12 @@ class FeatureEngineer:
             tuple: (X_train, X_test, y_train, y_test, feature_names)
         """
         # Select numerical features for modeling
+        # Note: Excluded post-release features (release_year, vote_average, vote_count, status)
+        # as they are not known at production time
+        # Also excluded revenue_log to avoid data leakage (revenue is what we're predicting)
         numerical_features = [
-            'release_year', 'release_month', 'release_quarter', 'release_decade',
-            'budget_log', 'revenue_log', 'budget_per_minute',
-            'vote_confidence', 'rating_popularity_score',
-            'status_released', 'status_post_production', 'is_adult'
+            'budget_log', 'budget_per_minute', 'runtime',
+            'is_adult'
         ]
         
         # Add genre features
