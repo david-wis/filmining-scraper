@@ -3,20 +3,23 @@ Feature engineering module for the Streamlit ROI prediction app.
 """
 import pandas as pd
 import numpy as np
+import joblib
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
+from sentence_transformers import SentenceTransformer
 
 
 class FeatureEngineer:
-    """
-    Feature engineering class for movie ROI prediction.
-    """
     
     def __init__(self):
         self.scaler = StandardScaler()
         self.label_encoders = {}
         self.feature_columns = []
         self.target_column = 'roi'
+        # Sentence transformer is only used for single predictions, not for training
+        self.sentence_transformer = None
+        self.embedding_dim = 384  # MiniLM-L6 produces 384-dimensional embeddings
+        self.text_feature_names = []
         
     def create_features(self, df):
         """
@@ -93,6 +96,17 @@ class FeatureEngineer:
             labels=['low', 'medium', 'high', 'very_high']
         )
         
+        # 11. Text features from overview
+        if 'text_content' in df_features.columns:
+            # Fill missing text with empty string
+            df_features['text_content'] = df_features['text_content'].fillna('')
+        elif 'overview' in df_features.columns:
+            # Use overview for text content
+            df_features['text_content'] = df_features['overview'].fillna('').astype(str)
+        else:
+            # No text content available
+            df_features['text_content'] = ''
+        
         return df_features
     
     def _get_top_genres(self, df, top_n=10):
@@ -139,6 +153,30 @@ class FeatureEngineer:
         country_features = [col for col in df.columns if col.startswith('country_')]
         language_features = [col for col in df.columns if col.startswith('language_')]
         
+        # Process text features if available - load from database instead of generating
+        text_features_array = None
+        if 'overview_embedding' in df.columns:
+            # Use pre-computed embeddings from database
+            # Filter out rows with null embeddings
+            valid_embeddings = df['overview_embedding'].notna()
+            if valid_embeddings.any():
+                # Convert string representation to numpy array if needed
+                embeddings_list = []
+                for emb in df['overview_embedding']:
+                    if emb is not None:
+                        if isinstance(emb, str):
+                            # Parse string representation like '[0.1, 0.2, ...]'
+                            emb = np.array([float(x) for x in emb.strip('[]').split(',')])
+                        elif isinstance(emb, list):
+                            emb = np.array(emb)
+                        embeddings_list.append(emb)
+                    else:
+                        # For null embeddings, use zero vector
+                        embeddings_list.append(np.zeros(self.embedding_dim))
+                
+                text_features_array = np.array(embeddings_list)
+                self.text_feature_names = [f'text_emb_{i}' for i in range(self.embedding_dim)]
+        
         # Combine all features
         feature_columns = numerical_features + genre_features + country_features + language_features
         
@@ -153,6 +191,16 @@ class FeatureEngineer:
         
         # Ensure all values are finite
         X = X.fillna(0)
+        
+        # Combine with text features if available
+        if text_features_array is not None:
+            text_df = pd.DataFrame(
+                text_features_array,
+                columns=self.text_feature_names,
+                index=X.index
+            )
+            X = pd.concat([X, text_df], axis=1)
+            feature_columns = feature_columns + self.text_feature_names
         
         y = df[self.target_column]
         
@@ -196,12 +244,31 @@ class FeatureEngineer:
         
         # Select the same features used in training
         if self.feature_columns:
-            # Ensure all expected features exist, create missing ones with 0
-            for feature in self.feature_columns:
+            # Get non-text features
+            non_text_features = [f for f in self.feature_columns if not f.startswith('text_')]
+            
+            # Ensure all expected non-text features exist, create missing ones with 0
+            for feature in non_text_features:
                 if feature not in df_pred.columns:
                     df_pred[feature] = 0
             
-            X_pred = df_pred[self.feature_columns].fillna(0)
+            X_pred = df_pred[non_text_features].fillna(0)
+            
+            # Process text features if they were used in training
+            if self.text_feature_names:
+                # Initialize sentence transformer only when needed for single predictions
+                if self.sentence_transformer is None:
+                    self.sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
+                
+                text_content = df_pred['text_content'].fillna('').iloc[0]
+                # Generate semantic embedding for the text
+                embedding = self.sentence_transformer.encode([text_content])
+                text_df = pd.DataFrame(
+                    embedding,
+                    columns=self.text_feature_names,
+                    index=X_pred.index
+                )
+                X_pred = pd.concat([X_pred, text_df], axis=1)
         else:
             # Fallback to default features if not trained yet
             default_features = [
@@ -219,3 +286,40 @@ class FeatureEngineer:
         X_pred_scaled = pd.DataFrame(X_pred_scaled, columns=X_pred.columns)
         
         return X_pred_scaled
+    
+    def save_feature_engineer(self, filepath):
+        """
+        Save feature engineer configuration to file.
+        
+        Args:
+            filepath (str): Path to save the feature engineer
+        """
+        engineer_data = {
+            'scaler': self.scaler,
+            'label_encoders': self.label_encoders,
+            'feature_columns': self.feature_columns,
+            'target_column': self.target_column,
+            'embedding_dim': self.embedding_dim,
+            'text_feature_names': self.text_feature_names
+        }
+        # Note: sentence_transformer model is not saved, will be reloaded on load
+        
+        joblib.dump(engineer_data, filepath)
+    
+    def load_feature_engineer(self, filepath):
+        """
+        Load feature engineer configuration from file.
+        
+        Args:
+            filepath (str): Path to load the feature engineer from
+        """
+        engineer_data = joblib.load(filepath)
+        self.scaler = engineer_data['scaler']
+        self.label_encoders = engineer_data['label_encoders']
+        self.feature_columns = engineer_data['feature_columns']
+        self.target_column = engineer_data['target_column']
+        # Handle both old (TF-IDF) and new (embeddings) formats
+        self.embedding_dim = engineer_data.get('embedding_dim', 384)
+        self.text_feature_names = engineer_data['text_feature_names']
+        # Don't initialize sentence_transformer until needed (for single predictions only)
+        self.sentence_transformer = None

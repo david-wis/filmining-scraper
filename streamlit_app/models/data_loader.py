@@ -19,7 +19,7 @@ def load_movies_data():
     if engine is None:
         return None
     
-    # Main query to get movies with genres
+    # Main query to get movies with genres and embeddings
     query = """
     SELECT 
         m.id, m.tmdb_id, m.title, m.original_title, m.overview, m.tagline,
@@ -27,6 +27,7 @@ def load_movies_data():
         m.vote_average, m.vote_count, m.poster_path, m.backdrop_path,
         m.adult, m.status, m.original_language, m.production_companies,
         m.production_countries, m.spoken_languages, m.created_at, m.updated_at,
+        m.overview_embedding,
         STRING_AGG(g.name, ', ') as genres
     FROM movies m
     LEFT JOIN movie_genres mg ON m.id = mg.movie_id
@@ -35,7 +36,8 @@ def load_movies_data():
              m.release_date, m.runtime, m.budget, m.revenue, m.popularity,
              m.vote_average, m.vote_count, m.poster_path, m.backdrop_path,
              m.adult, m.status, m.original_language, m.production_companies,
-             m.production_countries, m.spoken_languages, m.created_at, m.updated_at
+             m.production_countries, m.spoken_languages, m.created_at, m.updated_at,
+             m.overview_embedding
     ORDER BY m.popularity DESC
     """
     
@@ -117,6 +119,11 @@ def prepare_movies_for_modeling(df_movies):
             return "Unknown"
     
     df['main_country'] = df['production_countries'].apply(get_main_country_name)
+    
+    # Combine tagline and overview for text analysis
+    df['text_content'] = (
+        df['tagline'].fillna('') + ' ' + df['overview'].fillna('')
+    ).str.strip()
     
     # Filter data quality issues (as per notebook analysis)
     # Remove movies with budget < $100,000 (likely data errors)

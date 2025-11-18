@@ -92,8 +92,24 @@ def main():
     # Initialize session state
     if 'model_trainer' not in st.session_state:
         st.session_state.model_trainer = ROIModelTrainer()
+        # Try to load model from file if exists
+        import os
+        model_path = os.path.join('saved_models', 'roi_model.pkl')
+        if os.path.exists(model_path):
+            try:
+                st.session_state.model_trainer.load_model(model_path)
+            except Exception as e:
+                st.warning(f"Could not load saved model: {e}")
     if 'feature_engineer' not in st.session_state:
         st.session_state.feature_engineer = FeatureEngineer()
+        # Try to load feature engineer from file if exists
+        import os
+        engineer_path = os.path.join('saved_models', 'feature_engineer.pkl')
+        if os.path.exists(engineer_path):
+            try:
+                st.session_state.feature_engineer.load_feature_engineer(engineer_path)
+            except Exception as e:
+                st.warning(f"Could not load saved feature engineer: {e}")
     
     # Route to different pages
     if page == "🏠 Home":
@@ -223,7 +239,8 @@ def show_prediction_page(df_clean, df_genres):
         # Basic movie information
         st.subheader("📝 Basic Information")
         
-        title = st.text_input("Movie Title", value="My Movie")
+        # Overview input for model
+        overview = st.text_area("Movie Overview", value="", help="Enter a brief description or synopsis of the movie.")
         budget = st.number_input("Budget (USD)", min_value=100000, max_value=500000000, value=10000000, step=1000000)
         runtime = st.number_input("Runtime (minutes)", min_value=60, max_value=300, value=120, step=5)
         
@@ -250,7 +267,6 @@ def show_prediction_page(df_clean, df_genres):
         
         # Prepare movie data
         movie_data = {
-            'title': title,
             'budget': budget,
             'runtime': runtime,
             'release_date': '2024-01-01',  # Placeholder - not used in features
@@ -261,7 +277,8 @@ def show_prediction_page(df_clean, df_genres):
             'adult': adult,
             'status': 'Released',  # Not used in prediction
             'genres': ', '.join(selected_genres),
-            'production_countries': f'[{{"name": "{main_country}"}}]'
+                'production_countries': f'[{{"name": "{main_country}"}}]',
+                'overview': overview,
         }
         
         try:
@@ -563,6 +580,14 @@ def show_model_training_page(df_clean):
                 metrics = st.session_state.model_trainer.train_model(
                     X_train, y_train, X_test, y_test, optimize_hyperparams=optimize_hyperparams
                 )
+                # Save model and feature engineer automatically after training
+                model_path = os.path.join('saved_models', 'roi_model.pkl')
+                engineer_path = os.path.join('saved_models', 'feature_engineer.pkl')
+                try:
+                    st.session_state.model_trainer.save_model(model_path)
+                    st.session_state.feature_engineer.save_feature_engineer(engineer_path)
+                except Exception as e:
+                    st.warning(f"Could not save model/feature engineer: {e}")
                 
                 st.success("✅ Model trained successfully!")
                 

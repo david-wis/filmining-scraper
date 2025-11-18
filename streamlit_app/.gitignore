@@ -18,6 +18,9 @@ var/
 wheels/
 *.egg-info/
 .installed.cfg
+
+# Saved models
+saved_models/
 *.egg
 
 # Virtual environments
