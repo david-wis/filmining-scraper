@@ -68,7 +68,7 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.selectbox(
         "Choose a page:",
-        ["🏠 Home", "🔮 Predict ROI", "📊 Data Analysis", "📝 Semantic Analysis", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis"]
+        ["🏠 Home", "🔮 Predict ROI", "📊 Data Analysis", "📝 Semantic Analysis", "🎯 Thematic Clustering", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis"]
     )
     
     # Database connection check
@@ -104,6 +104,8 @@ def main():
         show_data_analysis_page(df_clean, df_genres)
     elif page == "📝 Semantic Analysis":
         show_semantic_analysis_page()
+    elif page == "🎯 Thematic Clustering":
+        show_clustering_page()
     elif page == "🤖 Model Training":
         show_model_training_page(df_clean)
     elif page == "📈 Model Performance":
@@ -1430,6 +1432,647 @@ def show_semantic_analysis_page():
             st.write(f"Title: {df_docs.loc[idx_min, 'title']}")
             st.write(f"ROI: {df_docs.loc[idx_min, 'roi']:.2f}")
             st.write(f"Document preview: {df_docs.loc[idx_min, 'document'][:300]}...")
+
+
+def show_clustering_page():
+    """Display thematic clustering page using UMAP and HDBSCAN."""
+    from utils.clustering import (
+        get_database_connection, load_embeddings_and_movie_data,
+        perform_umap_reduction, perform_hdbscan_clustering,
+        analyze_clusters, get_cluster_representative_movies
+    )
+    
+    st.header("🎯 Thematic Clustering Analysis")
+    
+    st.markdown("""
+    This page performs **thematic clustering** of movies based on their overview embeddings.
+    We use **UMAP** for dimensionality reduction and **HDBSCAN** for clustering to discover
+    thematic groups of movies and analyze their ROI patterns.
+    """)
+    
+    # Check dependencies
+    try:
+        import umap
+        import hdbscan
+    except ImportError as e:
+        st.error(f"❌ Missing dependency: {str(e)}")
+        st.info("Please install required packages: `pip install umap-learn hdbscan`")
+        return
+    
+    # Database connection
+    engine = get_database_connection()
+    if engine is None:
+        st.error("❌ Cannot connect to database.")
+        return
+    
+    # Load data section
+    st.subheader("📥 Load Data")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        sample_size = st.number_input(
+            "Number of movies to analyze",
+            min_value=100,
+            max_value=10000,
+            value=1000,
+            step=100,
+            help="Analyzing fewer movies is faster. Start with 1000 for good results."
+        )
+    
+    with col2:
+        random_seed = st.number_input(
+            "Random seed",
+            min_value=0,
+            max_value=1000,
+            value=42,
+            help="For reproducible results"
+        )
+    
+    if st.button("🔄 Load Embeddings", type="primary"):
+        with st.spinner("Loading embeddings from database..."):
+            embeddings, df_movies = load_embeddings_and_movie_data(
+                engine, sample_size=sample_size, random_seed=random_seed
+            )
+        
+        if embeddings is None or df_movies is None:
+            st.error("❌ Failed to load embeddings. Make sure embeddings are generated in the database.")
+            return
+        
+        st.session_state['clustering_embeddings'] = embeddings
+        st.session_state['clustering_movies'] = df_movies
+        st.success(f"✅ Loaded {len(df_movies):,} movies with embeddings of dimension {embeddings.shape[1]}")
+    
+    # Check if data is loaded
+    if 'clustering_embeddings' not in st.session_state:
+        st.info("👆 Click the button above to load embeddings from the database.")
+        return
+    
+    embeddings = st.session_state['clustering_embeddings']
+    df_movies = st.session_state['clustering_movies']
+    
+    # Clustering configuration
+    st.subheader("⚙️ Clustering Configuration")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("**UMAP Parameters**")
+        umap_n_neighbors = st.slider(
+            "n_neighbors",
+            min_value=5,
+            max_value=50,
+            value=15,
+            help="Number of neighbors for UMAP"
+        )
+        umap_min_dist = st.slider(
+            "min_dist",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.1,
+            step=0.05,
+            help="Minimum distance in UMAP"
+        )
+        umap_n_components = st.selectbox(
+            "Reduction dimensions",
+            [2, 3],
+            index=0,
+            help="2D for visualization, 3D for more detail"
+        )
+    
+    with col2:
+        st.markdown("**HDBSCAN Parameters**")
+        min_cluster_size = st.slider(
+            "min_cluster_size",
+            min_value=5,
+            max_value=50,
+            value=10,
+            help="Minimum size of clusters"
+        )
+        min_samples = st.slider(
+            "min_samples",
+            min_value=1,
+            max_value=20,
+            value=5,
+            help="Minimum samples in neighborhood"
+        )
+        cluster_epsilon = st.slider(
+            "cluster_selection_epsilon",
+            min_value=0.0,
+            max_value=0.5,
+            value=0.0,
+            step=0.05,
+            help="Distance threshold for cluster selection"
+        )
+    
+    with col3:
+        st.markdown("**Processing Options**")
+        use_umap_reduction = st.checkbox(
+            "Use UMAP reduction before clustering",
+            value=True,
+            help="Reduce dimensions with UMAP before clustering (recommended)"
+        )
+        show_noise = st.checkbox(
+            "Show noise points",
+            value=True,
+            help="Show movies that don't belong to any cluster"
+        )
+    
+    # Perform clustering
+    if st.button("🚀 Perform Clustering", type="primary"):
+        with st.spinner("Performing UMAP reduction and HDBSCAN clustering..."):
+            try:
+                # UMAP reduction
+                if use_umap_reduction:
+                    reduced_embeddings = perform_umap_reduction(
+                        embeddings,
+                        n_components=umap_n_components,
+                        n_neighbors=umap_n_neighbors,
+                        min_dist=umap_min_dist,
+                        random_state=random_seed
+                    )
+                    clustering_input = reduced_embeddings
+                else:
+                    clustering_input = embeddings
+                    reduced_embeddings = None
+                
+                # HDBSCAN clustering
+                cluster_labels = perform_hdbscan_clustering(
+                    clustering_input,
+                    min_cluster_size=min_cluster_size,
+                    min_samples=min_samples,
+                    cluster_selection_epsilon=cluster_epsilon
+                )
+                
+                # Store results
+                st.session_state['cluster_labels'] = cluster_labels
+                st.session_state['reduced_embeddings'] = reduced_embeddings
+                st.session_state['clustering_input'] = clustering_input
+                st.session_state['umap_n_components'] = umap_n_components
+                st.session_state['use_umap_reduction'] = use_umap_reduction
+                
+                # Analyze clusters
+                cluster_stats = analyze_clusters(df_movies, cluster_labels)
+                st.session_state['cluster_stats'] = cluster_stats
+                
+                n_clusters = len([c for c in np.unique(cluster_labels) if c >= 0])
+                n_noise = np.sum(cluster_labels == -1)
+                
+                st.success(f"✅ Clustering completed! Found {n_clusters} clusters and {n_noise} noise points.")
+                
+            except Exception as e:
+                st.error(f"❌ Error during clustering: {str(e)}")
+                return
+    
+    # Check if clustering is done
+    if 'cluster_labels' not in st.session_state:
+        st.info("👆 Configure parameters and click 'Perform Clustering' to start.")
+        return
+    
+    cluster_labels = st.session_state['cluster_labels']
+    cluster_stats = st.session_state['cluster_stats']
+    reduced_embeddings = st.session_state.get('reduced_embeddings')
+    clustering_input = st.session_state.get('clustering_input', embeddings)
+    
+    # Create tabs for different visualizations
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Cluster Statistics",
+        "📈 ROI Analysis by Cluster",
+        "🗺️ Visualization",
+        "🎬 Cluster Representatives"
+    ])
+    
+    # Tab 1: Cluster Statistics
+    with tab1:
+        st.subheader("📊 Cluster Statistics")
+        
+        # Summary metrics
+        n_clusters = len([c for c in np.unique(cluster_labels) if c >= 0])
+        n_noise = np.sum(cluster_labels == -1)
+        total_movies = len(cluster_labels)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Clusters", n_clusters)
+        with col2:
+            st.metric("Noise Points", n_noise)
+        with col3:
+            st.metric("Clustered Movies", total_movies - n_noise)
+        with col4:
+            st.metric("Clustering Rate", f"{(total_movies - n_noise) / total_movies * 100:.1f}%")
+        
+        # Cluster statistics table
+        st.markdown("### Cluster Details")
+        
+        # Format cluster stats for display
+        display_stats = cluster_stats.copy()
+        if 'top_genres' in display_stats.columns:
+            display_stats = display_stats[['cluster_id', 'n_movies', 'roi_mean', 'roi_median', 
+                                          'roi_std', 'budget_mean', 'revenue_mean', 
+                                          'vote_average_mean', 'top_genres']]
+        else:
+            display_stats = display_stats[['cluster_id', 'n_movies', 'roi_mean', 'roi_median', 
+                                          'roi_std', 'budget_mean', 'revenue_mean', 
+                                          'vote_average_mean']]
+        
+        display_stats = display_stats.sort_values('roi_mean', ascending=False)
+        display_stats.columns = ['Cluster ID', 'Movies', 'ROI Mean', 'ROI Median', 
+                                'ROI Std', 'Budget Mean', 'Revenue Mean', 
+                                'Vote Avg', 'Top Genres'] if 'top_genres' in display_stats.columns else \
+                              ['Cluster ID', 'Movies', 'ROI Mean', 'ROI Median', 
+                               'ROI Std', 'Budget Mean', 'Revenue Mean', 'Vote Avg']
+        
+        st.dataframe(
+            display_stats.style.format({
+                'ROI Mean': '{:.2f}',
+                'ROI Median': '{:.2f}',
+                'ROI Std': '{:.2f}',
+                'Budget Mean': '{:,.0f}',
+                'Revenue Mean': '{:,.0f}',
+                'Vote Avg': '{:.2f}'
+            }),
+            width="stretch",
+            height=400
+        )
+    
+    # Tab 2: ROI Analysis by Cluster
+    with tab2:
+        st.subheader("📈 ROI Analysis by Cluster")
+        
+        # Filter out noise if requested
+        display_stats = cluster_stats[cluster_stats['cluster_id'] >= 0] if not show_noise else cluster_stats
+        
+        # ROI Mean by Cluster
+        st.markdown("### Average ROI by Cluster")
+        
+        fig_roi_mean = px.bar(
+            display_stats.sort_values('roi_mean', ascending=True),
+            x='roi_mean',
+            y='cluster_id',
+            orientation='h',
+            color='roi_mean',
+            color_continuous_scale='RdYlGn',
+            labels={'roi_mean': 'Average ROI', 'cluster_id': 'Cluster ID'},
+            title='Average ROI by Cluster'
+        )
+        fig_roi_mean.add_vline(x=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig_roi_mean.update_layout(height=600)
+        st.plotly_chart(fig_roi_mean, width="stretch")
+        
+        # ROI Distribution by Cluster
+        st.markdown("### ROI Distribution by Cluster")
+        
+        df_with_clusters = df_movies.copy()
+        df_with_clusters['cluster'] = cluster_labels
+        
+        if not show_noise:
+            df_with_clusters = df_with_clusters[df_with_clusters['cluster'] >= 0]
+        
+        fig_roi_dist = px.box(
+            df_with_clusters,
+            x='cluster',
+            y='roi',
+            color='cluster',
+            labels={'cluster': 'Cluster ID', 'roi': 'ROI'},
+            title='ROI Distribution by Cluster'
+        )
+        fig_roi_dist.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig_roi_dist.update_layout(height=500, showlegend=False)
+        st.plotly_chart(fig_roi_dist, width="stretch")
+        
+        # Cluster size vs ROI
+        st.markdown("### Cluster Size vs Average ROI")
+        
+        fig_size_roi = px.scatter(
+            display_stats,
+            x='n_movies',
+            y='roi_mean',
+            size='n_movies',
+            color='roi_mean',
+            color_continuous_scale='RdYlGn',
+            hover_data=['cluster_id', 'roi_median', 'vote_average_mean'],
+            labels={'n_movies': 'Number of Movies', 'roi_mean': 'Average ROI', 'cluster_id': 'Cluster ID'},
+            title='Cluster Size vs Average ROI'
+        )
+        fig_size_roi.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig_size_roi.update_layout(height=500)
+        st.plotly_chart(fig_size_roi, width="stretch")
+        
+        # Top and Bottom Clusters
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**🏆 Top 5 Clusters by ROI**")
+            top_clusters = display_stats.nlargest(5, 'roi_mean')
+            st.dataframe(
+                top_clusters[['cluster_id', 'n_movies', 'roi_mean', 'roi_median']].style.format({
+                    'roi_mean': '{:.2f}',
+                    'roi_median': '{:.2f}'
+                }),
+                width="stretch"
+            )
+        
+        with col2:
+            st.markdown("**📉 Bottom 5 Clusters by ROI**")
+            bottom_clusters = display_stats.nsmallest(5, 'roi_mean')
+            st.dataframe(
+                bottom_clusters[['cluster_id', 'n_movies', 'roi_mean', 'roi_median']].style.format({
+                    'roi_mean': '{:.2f}',
+                    'roi_median': '{:.2f}'
+                }),
+                width="stretch"
+            )
+    
+    # Tab 3: Visualization
+    with tab3:
+        st.subheader("🗺️ Cluster Visualization")
+        
+        # Get the actual number of components used from session state
+        umap_n_components = st.session_state.get('umap_n_components', 2)
+        use_umap_reduction = st.session_state.get('use_umap_reduction', True)
+        actual_n_components = umap_n_components if use_umap_reduction else 2
+        
+        if reduced_embeddings is None:
+            st.warning("⚠️ UMAP reduction was not used. Using original embeddings for visualization.")
+            # Use PCA for visualization if UMAP wasn't used
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=actual_n_components, random_state=random_seed)
+            vis_embeddings = pca.fit_transform(embeddings)
+        else:
+            vis_embeddings = reduced_embeddings
+        
+        # Color by cluster or ROI
+        color_by = st.radio(
+            "Color by:",
+            ["Cluster", "ROI Individual", "ROI Cluster Average"],
+            horizontal=True
+        )
+        
+        # Always calculate truncation bounds based on individual ROI values
+        roi_individual = df_movies['roi'].values
+        
+        # Calculate cluster average ROI if needed (but truncation uses individual values)
+        if color_by == "ROI Cluster Average":
+            # Create a mapping from cluster_id to average ROI
+            df_with_clusters = pd.DataFrame({
+                'cluster': cluster_labels,
+                'roi': roi_individual
+            })
+            cluster_avg_roi = df_with_clusters.groupby('cluster')['roi'].mean().to_dict()
+            # Map each point to its cluster's average ROI
+            roi_values_for_color = np.array([cluster_avg_roi.get(c, 0) for c in cluster_labels])
+        else:
+            roi_values_for_color = roi_individual
+        
+        # Truncate ROI values for color mapping when coloring by ROI
+        # IMPORTANT: Truncation bounds are always calculated from individual ROI values
+        if color_by in ["ROI Individual", "ROI Cluster Average"]:
+            # Show statistics and allow manual adjustment
+            with st.expander("⚙️ Color Scale Settings", expanded=False):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Automatic (Percentile-based)**")
+                    st.caption("Bounds calculated from individual ROI values")
+                    percentile_method = st.selectbox(
+                        "Percentile range",
+                        ["1st-99th (most inclusive)", "5th-95th (recommended)", "10th-90th (more restrictive)"],
+                        index=1
+                    )
+                    
+                    if percentile_method == "1st-99th (most inclusive)":
+                        lower_percentile, upper_percentile = 1, 99
+                    elif percentile_method == "5th-95th (recommended)":
+                        lower_percentile, upper_percentile = 5, 95
+                    else:
+                        lower_percentile, upper_percentile = 10, 90
+                    
+                    # Calculate bounds from INDIVIDUAL ROI values
+                    lower_bound = np.percentile(roi_individual, lower_percentile)
+                    upper_bound = np.percentile(roi_individual, upper_percentile)
+                
+                with col2:
+                    st.markdown("**Manual Override**")
+                    use_manual = st.checkbox("Use manual limits", value=False)
+                    if use_manual:
+                        min_roi = float(roi_individual.min())
+                        max_roi = float(roi_individual.max())
+                        
+                        lower_bound = st.number_input(
+                            "Lower bound",
+                            min_value=min_roi,
+                            max_value=max_roi,
+                            value=float(lower_bound),
+                            step=0.1
+                        )
+                        upper_bound = st.number_input(
+                            "Upper bound",
+                            min_value=min_roi,
+                            max_value=max_roi,
+                            value=float(upper_bound),
+                            step=0.1
+                        )
+                
+                # Show statistics for both individual and cluster average (if applicable)
+                st.markdown("**ROI Statistics (Individual Values):**")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Min", f"{roi_individual.min():.2f}")
+                with col2:
+                    st.metric("Max", f"{roi_individual.max():.2f}")
+                with col3:
+                    st.metric("Median", f"{np.median(roi_individual):.2f}")
+                with col4:
+                    st.metric("Mean", f"{roi_individual.mean():.2f}")
+                
+                if color_by == "ROI Cluster Average":
+                    st.markdown("**ROI Statistics (Cluster Averages):**")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Min", f"{roi_values_for_color.min():.2f}")
+                    with col2:
+                        st.metric("Max", f"{roi_values_for_color.max():.2f}")
+                    with col3:
+                        st.metric("Median", f"{np.median(roi_values_for_color):.2f}")
+                    with col4:
+                        st.metric("Mean", f"{roi_values_for_color.mean():.2f}")
+                
+                st.write(f"**Color scale range:** [{lower_bound:.2f}, {upper_bound:.2f}] (based on individual ROI)")
+            
+            # Truncate values for color mapping using bounds calculated from individual ROI
+            roi_for_color = np.clip(roi_values_for_color, lower_bound, upper_bound)
+            n_outliers = np.sum((roi_values_for_color < lower_bound) | (roi_values_for_color > upper_bound))
+            
+            if n_outliers > 0:
+                color_type = "cluster average ROI" if color_by == "ROI Cluster Average" else "ROI"
+                st.info(f"📊 Truncated {n_outliers} {color_type} values for color scale (bounds: [{lower_bound:.2f}, {upper_bound:.2f}], calculated from individual ROI)")
+        else:
+            roi_for_color = roi_values_for_color
+        
+        # Create visualization dataframe
+        if actual_n_components == 3:
+            # 3D visualization
+            df_viz = pd.DataFrame({
+                'x': vis_embeddings[:, 0],
+                'y': vis_embeddings[:, 1],
+                'z': vis_embeddings[:, 2],
+                'cluster': cluster_labels,
+                'roi': roi_for_color if color_by in ["ROI Individual", "ROI Cluster Average"] else df_movies['roi'].values,
+                'roi_original': df_movies['roi'].values,  # Keep original for hover
+                'roi_cluster_avg': roi_for_color if color_by == "ROI Cluster Average" else None,
+                'title': df_movies['title'].values,
+                'vote_average': df_movies['vote_average'].values
+            })
+            
+            # Filter noise if requested
+            if not show_noise:
+                df_viz = df_viz[df_viz['cluster'] >= 0]
+            
+            if color_by == "Cluster":
+                fig = px.scatter_3d(
+                    df_viz,
+                    x='x',
+                    y='y',
+                    z='z',
+                    color='cluster',
+                    size='vote_average',
+                    hover_data=['title', 'roi_original', 'vote_average'],
+                    labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'z': 'UMAP Dimension 3', 'cluster': 'Cluster'},
+                    title='Movie Clusters in 3D Space (colored by cluster)',
+                    color_continuous_scale='viridis'
+                )
+            else:
+                title_suffix = "by cluster average ROI" if color_by == "ROI Cluster Average" else "by ROI"
+                hover_data = ['title', 'cluster', 'vote_average', 'roi_original']
+                if color_by == "ROI Cluster Average":
+                    hover_data.append('roi_cluster_avg')
+                
+                fig = px.scatter_3d(
+                    df_viz,
+                    x='x',
+                    y='y',
+                    z='z',
+                    color='roi',
+                    size='vote_average',
+                    hover_data=hover_data,
+                    labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'z': 'UMAP Dimension 3', 
+                           'roi': 'ROI (truncated)', 'roi_original': 'ROI Individual', 
+                           'roi_cluster_avg': 'ROI Cluster Avg'},
+                    title=f'Movie Clusters in 3D Space (colored {title_suffix})',
+                    color_continuous_scale='RdYlGn'
+                )
+        else:
+            # 2D visualization
+            df_viz = pd.DataFrame({
+                'x': vis_embeddings[:, 0],
+                'y': vis_embeddings[:, 1],
+                'cluster': cluster_labels,
+                'roi': roi_for_color if color_by in ["ROI Individual", "ROI Cluster Average"] else df_movies['roi'].values,
+                'roi_original': df_movies['roi'].values,  # Keep original for hover
+                'roi_cluster_avg': roi_for_color if color_by == "ROI Cluster Average" else None,
+                'title': df_movies['title'].values,
+                'vote_average': df_movies['vote_average'].values
+            })
+            
+            # Filter noise if requested
+            if not show_noise:
+                df_viz = df_viz[df_viz['cluster'] >= 0]
+            
+            if color_by == "Cluster":
+                fig = px.scatter(
+                    df_viz,
+                    x='x',
+                    y='y',
+                    color='cluster',
+                    size='vote_average',
+                    hover_data=['title', 'roi_original', 'vote_average'],
+                    labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'cluster': 'Cluster'},
+                    title='Movie Clusters in 2D Space (colored by cluster)',
+                    color_continuous_scale='viridis'
+                )
+            else:
+                title_suffix = "by cluster average ROI" if color_by == "ROI Cluster Average" else "by ROI"
+                hover_data = ['title', 'cluster', 'vote_average', 'roi_original']
+                if color_by == "ROI Cluster Average":
+                    hover_data.append('roi_cluster_avg')
+                
+                fig = px.scatter(
+                    df_viz,
+                    x='x',
+                    y='y',
+                    color='roi',
+                    size='vote_average',
+                    hover_data=hover_data,
+                    labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 
+                           'roi': 'ROI (truncated)', 'roi_original': 'ROI Individual',
+                           'roi_cluster_avg': 'ROI Cluster Avg'},
+                    title=f'Movie Clusters in 2D Space (colored {title_suffix})',
+                    color_continuous_scale='RdYlGn'
+                )
+        
+        fig.update_layout(height=700)
+        st.plotly_chart(fig, width="stretch")
+    
+    # Tab 4: Cluster Representatives
+    with tab4:
+        st.subheader("🎬 Cluster Representatives")
+        
+        st.markdown("""
+        Representative movies for each cluster (closest to cluster centroid).
+        These movies best represent the thematic content of their cluster.
+        """)
+        
+        n_representatives = st.slider(
+            "Number of representative movies per cluster",
+            min_value=1,
+            max_value=10,
+            value=3
+        )
+        
+        if st.button("🔄 Update Representatives"):
+            with st.spinner("Calculating cluster representatives..."):
+                representatives = get_cluster_representative_movies(
+                    df_movies,
+                    cluster_labels,
+                    embeddings,
+                    n_per_cluster=n_representatives
+                )
+                st.session_state['cluster_representatives'] = representatives
+        
+        if 'cluster_representatives' in st.session_state:
+            representatives = st.session_state['cluster_representatives']
+            
+            # Sort clusters by ROI
+            sorted_clusters = sorted(
+                representatives.keys(),
+                key=lambda c: cluster_stats[cluster_stats['cluster_id'] == c]['roi_mean'].values[0] if len(cluster_stats[cluster_stats['cluster_id'] == c]) > 0 else -999,
+                reverse=True
+            )
+            
+            for cluster_id in sorted_clusters:
+                cluster_info = cluster_stats[cluster_stats['cluster_id'] == cluster_id]
+                if len(cluster_info) > 0:
+                    roi_mean = cluster_info['roi_mean'].values[0]
+                    n_movies = cluster_info['n_movies'].values[0]
+                else:
+                    roi_mean = 0
+                    n_movies = 0
+                
+                with st.expander(f"Cluster {cluster_id} - ROI: {roi_mean:.2f} ({n_movies} movies)"):
+                    for movie in representatives[cluster_id]:
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.markdown(f"**{movie['title']}**")
+                            if pd.notna(movie.get('overview')):
+                                st.write(movie['overview'][:200] + "..." if len(str(movie.get('overview', ''))) > 200 else movie.get('overview', ''))
+                        with col2:
+                            if pd.notna(movie.get('roi')):
+                                st.metric("ROI", f"{movie['roi']:.2f}")
+                            if pd.notna(movie.get('vote_average')):
+                                st.metric("Rating", f"{movie['vote_average']:.1f}")
+                        st.markdown("---")
+        else:
+            st.info("👆 Click 'Update Representatives' to see representative movies for each cluster.")
 
 
 if __name__ == "__main__":
