@@ -550,6 +550,182 @@ def show_model_training_page(df_clean):
     
     with col2:
         random_state = st.number_input("Random State", min_value=0, max_value=1000, value=42)
+        # ROI truncation percentiles
+        roi_lower_pct = st.number_input(
+            "ROI lower percentile (0-100)", min_value=0, max_value=100, value=1, step=1, key="roi_lower_pct"
+        )
+        roi_upper_pct = st.number_input(
+            "ROI upper percentile (0-100)", min_value=0, max_value=100, value=99, step=1, key="roi_upper_pct"
+        )
+        st.caption("Values outside the selected percentile range will be truncated to the percentile value before training.")
+    
+    # Debug features section
+    st.divider()
+    st.subheader("🔍 Debug Features")
+    
+    show_features = st.checkbox("Show all features before training", value=False)
+    enable_feature_tinkering = st.checkbox("Enable feature tinkering (manually select features)", value=False)
+    
+    # Initialize feature selection in session state
+    if 'selected_features' not in st.session_state:
+        st.session_state.selected_features = None
+    
+    if show_features:
+        with st.spinner("Preparing features preview..."):
+            try:
+                # Prepare features to show what will be used
+                df_features_preview = st.session_state.feature_engineer.create_features(df_clean)
+                X_preview, _, _, _, feature_names = st.session_state.feature_engineer.prepare_modeling_data(
+                    df_features_preview, test_size=test_size, random_state=random_state
+                )
+                
+                st.success(f"✅ Total features available: **{len(feature_names)}**")
+                
+                # Group features by category
+                # Numeric features we want to show individually (keep names unchanged)
+                numeric_names = ['budget_per_minute', 'budget_log', 'runtime']
+                numeric_features = [f for f in feature_names if f in numeric_names]
+
+                # Runtime binary partitions (classification features)
+                runtime_blocks = [f for f in feature_names if f.startswith('runtime_') and f != 'runtime_category']
+
+                # Classification groups
+                genre_features = [f for f in feature_names if f.startswith('genre_')]
+                country_features = [f for f in feature_names if f.startswith('country_')]
+                language_features = [f for f in feature_names if f.startswith('language_')]
+
+                # Other features (not numeric and not in classification groups)
+                classification_prefixes = ['genre_', 'country_', 'language_', 'runtime_']
+                other_features = [f for f in feature_names if f not in numeric_features and not any(f.startswith(p) for p in classification_prefixes)]
+
+                feature_categories = {
+                    'Numeric Features': numeric_features,
+                    'Runtime Blocks': runtime_blocks,
+                    'Genres': genre_features,
+                    'Countries': country_features,
+                    'Languages': language_features,
+                    'Other': other_features
+                }
+                
+                # Initialize selected features with all features if not set
+                if st.session_state.selected_features is None:
+                    st.session_state.selected_features = set(feature_names)
+                
+                # Initialize enabled_feature_categories based on available display items
+                enabled = set()
+                display_order = [
+                    'budget_per_minute', 'budget_log', 'runtime',
+                    'runtime_blocks', 'genres', 'countries', 'languages', 'other'
+                ]
+                for itm in display_order:
+                    if itm == 'budget_per_minute' and any(f == 'budget_per_minute' for f in feature_names):
+                        enabled.add(itm)
+                    if itm == 'budget_log' and any(f == 'budget_log' for f in feature_names):
+                        enabled.add(itm)
+                    if itm == 'runtime' and any(f == 'runtime' for f in feature_names):
+                        enabled.add(itm)
+                    if itm == 'runtime_blocks' and feature_categories.get('Runtime Blocks'):
+                        enabled.add(itm)
+                    if itm == 'genres' and feature_categories.get('Genres'):
+                        enabled.add(itm)
+                    if itm == 'countries' and feature_categories.get('Countries'):
+                        enabled.add(itm)
+                    if itm == 'languages' and feature_categories.get('Languages'):
+                        enabled.add(itm)
+                    if itm == 'other' and feature_categories.get('Other'):
+                        enabled.add(itm)
+                if 'enabled_feature_categories' not in st.session_state:
+                    st.session_state.enabled_feature_categories = enabled
+
+                # Render display items as checkboxes (disabled when not tinkering)
+                for item in display_order:
+                    # Map item to underlying features
+                    if item == 'budget_per_minute':
+                        underlying = [f for f in feature_names if f == 'budget_per_minute']
+                    elif item == 'budget_log':
+                        underlying = [f for f in feature_names if f == 'budget_log']
+                    elif item == 'runtime':
+                        underlying = [f for f in feature_names if f == 'runtime']
+                    elif item == 'runtime_blocks':
+                        underlying = feature_categories.get('Runtime Blocks', [])
+                    elif item == 'genres':
+                        underlying = feature_categories.get('Genres', [])
+                    elif item == 'countries':
+                        underlying = feature_categories.get('Countries', [])
+                    elif item == 'languages':
+                        underlying = feature_categories.get('Languages', [])
+                    else:
+                        underlying = feature_categories.get('Other', [])
+
+                    # Build label: for classification groups include inline class list
+                    if item in ('genres', 'countries', 'languages', 'runtime_blocks'):
+                        short_names = []
+                        if item == 'runtime_blocks':
+                            for feat in underlying:
+                                s = feat.replace('runtime_', '')
+                                short_names.append(s.replace('_', '-'))
+                        elif item == 'genres':
+                            short_names = [f.replace('genre_', '') for f in underlying]
+                        elif item == 'countries':
+                            short_names = [f.replace('country_', '') for f in underlying]
+                        elif item == 'languages':
+                            short_names = [f.replace('language_', '') for f in underlying]
+
+                        label = f"{item}: {', '.join(short_names)}"
+                    else:
+                        label = item
+
+                    safe_key = f"feat_{item}"
+                    is_enabled = item in st.session_state.enabled_feature_categories
+                    checked = st.checkbox(label, value=is_enabled, key=safe_key, disabled=not enable_feature_tinkering)
+                    # Only update state when tinkering is enabled
+                    if enable_feature_tinkering:
+                        if checked:
+                            st.session_state.enabled_feature_categories.add(item)
+                        else:
+                            st.session_state.enabled_feature_categories.discard(item)
+
+                # Rebuild selected_features from enabled items
+                selected = set()
+
+                # numeric features (include only if enabled)
+                if 'budget_per_minute' in st.session_state.enabled_feature_categories:
+                    selected.update([f for f in numeric_features if f == 'budget_per_minute'])
+                if 'budget_log' in st.session_state.enabled_feature_categories:
+                    selected.update([f for f in numeric_features if f == 'budget_log'])
+                if 'runtime' in st.session_state.enabled_feature_categories:
+                    selected.update([f for f in numeric_features if f == 'runtime'])
+
+                # include 'Other' if enabled
+                if 'other' in st.session_state.enabled_feature_categories:
+                    selected.update(feature_categories.get('Other', []))
+
+                # include classification groups if enabled
+                if 'runtime_blocks' in st.session_state.enabled_feature_categories:
+                    selected.update(feature_categories.get('Runtime Blocks', []))
+                if 'genres' in st.session_state.enabled_feature_categories:
+                    selected.update(feature_categories.get('Genres', []))
+                if 'countries' in st.session_state.enabled_feature_categories:
+                    selected.update(feature_categories.get('Countries', []))
+                if 'languages' in st.session_state.enabled_feature_categories:
+                    selected.update(feature_categories.get('Languages', []))
+
+                st.session_state.selected_features = selected
+
+                # Show summary of selected features
+                selected_count = len(st.session_state.selected_features)
+                st.metric("Selected Features", f"{selected_count} / {len(feature_names)}")
+
+                if selected_count == 0:
+                    st.error("❌ Please select at least one feature to train the model.")
+                    return
+                
+                
+            except Exception as e:
+                st.error(f"❌ Error preparing features preview: {str(e)}")
+                return
+    
+    st.divider()
     
     if st.button("🚀 Train Model", type="primary"):
         
@@ -560,6 +736,52 @@ def show_model_training_page(df_clean):
                 X_train, X_test, y_train, y_test, feature_names = st.session_state.feature_engineer.prepare_modeling_data(
                     df_features, test_size=test_size, random_state=random_state
                 )
+                # Apply ROI truncation based on selected percentiles
+                try:
+                    # Validate percentiles
+                    if roi_lower_pct >= roi_upper_pct:
+                        st.error("❌ ROI lower percentile must be smaller than ROI upper percentile.")
+                        return
+
+                    lower_val = y_train.quantile(roi_lower_pct / 100.0)
+                    upper_val = y_train.quantile(roi_upper_pct / 100.0)
+
+                    train_below = int((y_train < lower_val).sum())
+                    train_above = int((y_train > upper_val).sum())
+                    test_below = int((y_test < lower_val).sum())
+                    test_above = int((y_test > upper_val).sum())
+
+                    # Clip target values to percentile bounds
+                    y_train = y_train.clip(lower=lower_val, upper=upper_val)
+                    y_test = y_test.clip(lower=lower_val, upper=upper_val)
+
+                    st.info(
+                        f"ROI truncation applied: {roi_lower_pct}th -> {lower_val:.3f}, {roi_upper_pct}th -> {upper_val:.3f}. "
+                        f"Train clipped: below={train_below}, above={train_above}; Test clipped: below={test_below}, above={test_above}."
+                    )
+                except Exception as e:
+                    st.error(f"❌ Error applying ROI truncation: {e}")
+                    return
+                
+                # Apply feature selection if enabled
+                if enable_feature_tinkering and st.session_state.selected_features:
+                    selected_features_list = list(st.session_state.selected_features)
+                    
+                    # Filter to only include features that exist in the dataset
+                    valid_selected_features = [f for f in selected_features_list if f in X_train.columns]
+                    
+                    if len(valid_selected_features) == 0:
+                        st.error("❌ None of the selected features are available in the dataset.")
+                        return
+                    
+                    st.info(f"🔍 Training with {len(valid_selected_features)} selected features (out of {len(feature_names)} total)")
+                    
+                    # Subset the data to selected features
+                    X_train = X_train[valid_selected_features]
+                    X_test = X_test[valid_selected_features]
+                    feature_names = valid_selected_features
+                else:
+                    st.info(f"🔍 Training with all {len(feature_names)} features")
                 
                 # Train model
                 metrics = st.session_state.model_trainer.train_model(
@@ -744,9 +966,9 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
                 st.write(f"**Genres:** {', '.join(baseline_genres)}")
         
         # Generate budget range
-        budget_min = st.number_input("Min Budget", min_value=100000, value=1000000, step=100000, key="budget_min")
+        budget_min = st.number_input("Min Budget", min_value=100000, value=100000, step=100000, key="budget_min")
         budget_max = st.number_input("Max Budget", min_value=budget_min, value=100000000, step=1000000, key="budget_max")
-        budget_steps = st.slider("Number of points", min_value=10, max_value=100, value=50, key="budget_steps")
+        budget_steps = st.slider("Number of points", min_value=10, max_value=100, value=100, key="budget_steps")
         
         budgets = np.linspace(budget_min, budget_max, budget_steps)
         roi_predictions = []
@@ -776,14 +998,23 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
         )
         st.plotly_chart(fig, width="stretch")
         
-        # Summary statistics
+        # Summary statistics (ignore failed predictions)
+        valid_preds = [p for p in roi_predictions if p is not None and not (isinstance(p, float) and np.isnan(p))]
         col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Min ROI", f"{min(roi_predictions):.2f}")
-        with col2:
-            st.metric("Max ROI", f"{max(roi_predictions):.2f}")
-        with col3:
-            st.metric("ROI Range", f"{max(roi_predictions) - min(roi_predictions):.2f}")
+        if valid_preds:
+            with col1:
+                st.metric("Min ROI", f"{min(valid_preds):.2f}")
+            with col2:
+                st.metric("Max ROI", f"{max(valid_preds):.2f}")
+            with col3:
+                st.metric("ROI Range", f"{max(valid_preds) - min(valid_preds):.2f}")
+        else:
+            with col1:
+                st.metric("Min ROI", "N/A")
+            with col2:
+                st.metric("Max ROI", "N/A")
+            with col3:
+                st.metric("ROI Range", "N/A")
     
     # Runtime Analysis
     with analysis_tabs[1]:
@@ -800,9 +1031,9 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
                 st.write(f"**Adult Content:** {baseline_adult}")
                 st.write(f"**Genres:** {', '.join(baseline_genres)}")
         
-        runtime_min = st.number_input("Min Runtime (minutes)", min_value=60, value=80, step=5, key="runtime_min")
-        runtime_max = st.number_input("Max Runtime (minutes)", min_value=runtime_min, value=180, step=5, key="runtime_max")
-        runtime_steps = st.slider("Number of points", min_value=10, max_value=50, value=25, key="runtime_steps")
+        runtime_min = st.number_input("Min Runtime (minutes)", min_value=45, value=60, step=5, key="runtime_min")
+        runtime_max = st.number_input("Max Runtime (minutes)", min_value=runtime_min, value=270, step=5, key="runtime_max")
+        runtime_steps = st.slider("Number of points", min_value=10, max_value=50, value=50, key="runtime_steps")
         
         runtimes = np.linspace(runtime_min, runtime_max, runtime_steps)
         roi_predictions = []
@@ -832,14 +1063,23 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
         )
         st.plotly_chart(fig, width="stretch")
         
-        # Summary statistics
+        # Summary statistics (ignore failed predictions)
+        valid_preds = [p for p in roi_predictions if p is not None and not (isinstance(p, float) and np.isnan(p))]
         col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Min ROI", f"{min(roi_predictions):.2f}")
-        with col2:
-            st.metric("Max ROI", f"{max(roi_predictions):.2f}")
-        with col3:
-            st.metric("ROI Range", f"{max(roi_predictions) - min(roi_predictions):.2f}")
+        if valid_preds:
+            with col1:
+                st.metric("Min ROI", f"{min(valid_preds):.2f}")
+            with col2:
+                st.metric("Max ROI", f"{max(valid_preds):.2f}")
+            with col3:
+                st.metric("ROI Range", f"{max(valid_preds) - min(valid_preds):.2f}")
+        else:
+            with col1:
+                st.metric("Min ROI", "N/A")
+            with col2:
+                st.metric("Max ROI", "N/A")
+            with col3:
+                st.metric("ROI Range", "N/A")
     
     # Country Analysis
     with analysis_tabs[2]:
@@ -875,27 +1115,29 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
                     st.error(f"Error predicting for country {country}: {str(e)}")
                     roi_predictions.append(None)
         
-        # Plot
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=countries, y=roi_predictions, name='Predicted ROI'))
-        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
-        fig.update_layout(
-            title="ROI by Production Country",
-            xaxis_title="Country",
-            yaxis_title="Predicted ROI",
-            height=500
-        )
-        st.plotly_chart(fig, width="stretch")
-        
-        # Best and worst
-        country_roi_df = pd.DataFrame({'Country': countries, 'ROI': roi_predictions}).sort_values('ROI', ascending=False)
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Top 5 Countries by ROI**")
-            st.dataframe(country_roi_df.head(5), width="stretch")
-        with col2:
-            st.markdown("**Bottom 5 Countries by ROI**")
-            st.dataframe(country_roi_df.tail(5), width="stretch")
+    # Plot (replace None with NaN so plot handles missing values)
+    y_vals = [np.nan if p is None else p for p in roi_predictions]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=countries, y=y_vals, name='Predicted ROI'))
+    fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+    fig.update_layout(
+        title="ROI by Production Country",
+        xaxis_title="Country",
+        yaxis_title="Predicted ROI",
+        height=500
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    # Best and worst (handle missing values)
+    country_roi_df = pd.DataFrame({'Country': countries, 'ROI': [np.nan if p is None else p for p in roi_predictions]})
+    country_roi_df = country_roi_df.sort_values('ROI', ascending=False, na_position='last')
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Top 5 Countries by ROI**")
+        st.dataframe(country_roi_df.head(5), width="stretch")
+    with col2:
+        st.markdown("**Bottom 5 Countries by ROI**")
+        st.dataframe(country_roi_df.tail(5), width="stretch")
     
     # Language Analysis
     with analysis_tabs[3]:
@@ -1475,7 +1717,7 @@ def show_clustering_page():
             "Number of movies to analyze",
             min_value=100,
             max_value=10000,
-            value=1000,
+            value=10000,
             step=100,
             help="Analyzing fewer movies is faster. Start with 1000 for good results."
         )
@@ -1522,7 +1764,7 @@ def show_clustering_page():
             "n_neighbors",
             min_value=5,
             max_value=50,
-            value=15,
+            value=50,
             help="Number of neighbors for UMAP"
         )
         umap_min_dist = st.slider(
@@ -1546,14 +1788,14 @@ def show_clustering_page():
             "min_cluster_size",
             min_value=5,
             max_value=50,
-            value=10,
+            value=20,
             help="Minimum size of clusters"
         )
         min_samples = st.slider(
             "min_samples",
             min_value=1,
             max_value=20,
-            value=5,
+            value=1,
             help="Minimum samples in neighborhood"
         )
         cluster_epsilon = st.slider(
@@ -1633,6 +1875,69 @@ def show_clustering_page():
     cluster_stats = st.session_state['cluster_stats']
     reduced_embeddings = st.session_state.get('reduced_embeddings')
     clustering_input = st.session_state.get('clustering_input', embeddings)
+
+    # Symbol palette for cluster markers (many distinct shapes)
+    # Allowed marker symbols for Plotly 3D scatter are limited; use the intersection
+    # of supported symbols to avoid runtime ValueErrors. If you need more shapes,
+    # consider using 2D plots or mapping additional visual encodings.
+    SYMBOL_SEQUENCE = [
+        'circle', 'circle-open', 'cross', 'diamond', 'diamond-open',
+        'square', 'square-open', 'x'
+    ]
+
+    import colorsys
+
+    def make_hsv_palette(n, s=0.7, v=0.9):
+        """Return n hex colors evenly spaced in HSV space."""
+        if n <= 0:
+            return []
+        colors = []
+        for i in range(n):
+            h = float(i) / float(n)
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            colors.append('#%02x%02x%02x' % (int(r * 255), int(g * 255), int(b * 255)))
+        return colors
+
+    def _make_color_legend_fig(cluster_ids, color_map):
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        # create one small marker per cluster for legend
+        for cid in cluster_ids:
+            # color_map keys are strings (cluster labels), so lookup by str(cid)
+            fig.add_trace(go.Scatter(
+                x=[cid], y=[0], mode='markers',
+                marker=dict(color=color_map.get(str(cid), '#888'), size=12),
+                name=f"Cluster {cid}",
+                showlegend=True
+            ))
+        fig.update_layout(
+            height=60,
+            margin=dict(l=0, r=0, t=0, b=0),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            legend=dict(orientation='h')
+        )
+        return fig
+
+    def _make_shape_legend_fig(cluster_ids, symbol_seq):
+        import plotly.graph_objects as go
+        fig = go.Figure()
+        for i, cid in enumerate(cluster_ids):
+            sym = symbol_seq[i % len(symbol_seq)]
+            fig.add_trace(go.Scatter(
+                x=[i], y=[0], mode='markers',
+                marker=dict(color='#444', size=12, symbol=sym),
+                name=f"Cluster {cid}",
+                showlegend=True
+            ))
+        fig.update_layout(
+            height=60,
+            margin=dict(l=0, r=0, t=0, b=0),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            legend=dict(orientation='h')
+        )
+        return fig
     
     # Create tabs for different visualizations
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -1733,6 +2038,7 @@ def show_clustering_page():
             x='cluster',
             y='roi',
             color='cluster',
+            color_discrete_sequence=px.colors.qualitative.Dark24,
             labels={'cluster': 'Cluster ID', 'roi': 'ROI'},
             title='ROI Distribution by Cluster'
         )
@@ -1742,7 +2048,7 @@ def show_clustering_page():
         
         # Cluster size vs ROI
         st.markdown("### Cluster Size vs Average ROI")
-        
+
         fig_size_roi = px.scatter(
             display_stats,
             x='n_movies',
@@ -1750,6 +2056,9 @@ def show_clustering_page():
             size='n_movies',
             color='roi_mean',
             color_continuous_scale='RdYlGn',
+            # Use different marker shapes per cluster to avoid relying solely on color gradients
+            symbol='cluster_id',
+            symbol_sequence=SYMBOL_SEQUENCE,
             hover_data=['cluster_id', 'roi_median', 'vote_average_mean'],
             labels={'n_movies': 'Number of Movies', 'roi_mean': 'Average ROI', 'cluster_id': 'Cluster ID'},
             title='Cluster Size vs Average ROI'
@@ -1929,17 +2238,32 @@ def show_clustering_page():
                 df_viz = df_viz[df_viz['cluster'] >= 0]
             
             if color_by == "Cluster":
+                # Build HSV palette for cluster colors and a mapping
+                cluster_ids = sorted(df_viz['cluster'].unique())
+                # Create a categorical label column so Plotly treats clusters as discrete
+                df_viz['cluster_label'] = df_viz['cluster'].astype(str)
+                # Define explicit category order (string keys) to guarantee deterministic mapping
+                cluster_label_order = [str(cid) for cid in cluster_ids]
+                df_viz['cluster_label'] = pd.Categorical(df_viz['cluster_label'], categories=cluster_label_order, ordered=True)
+                n_cls = len(cluster_ids)
+                hsv_colors = make_hsv_palette(n_cls)
+                # Color map must have string keys matching the cluster_label values
+                color_map = {str(cid): hsv_colors[i] for i, cid in enumerate(cluster_ids)}
+
                 fig = px.scatter_3d(
                     df_viz,
                     x='x',
                     y='y',
                     z='z',
-                    color='cluster',
+                    color='cluster_label',
+                    color_discrete_map=color_map,
+                    symbol='cluster_label',
+                    symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=['title', 'roi_original', 'vote_average'],
-                    labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'z': 'UMAP Dimension 3', 'cluster': 'Cluster'},
+                    labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'z': 'UMAP Dimension 3', 'cluster_label': 'Cluster'},
                     title='Movie Clusters in 3D Space (colored by cluster)',
-                    color_continuous_scale='viridis'
+                    category_orders={'cluster_label': cluster_label_order}
                 )
             else:
                 title_suffix = "by cluster average ROI" if color_by == "ROI Cluster Average" else "by ROI"
@@ -1953,6 +2277,8 @@ def show_clustering_page():
                     y='y',
                     z='z',
                     color='roi',
+                    symbol='cluster',
+                    symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=hover_data,
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'z': 'UMAP Dimension 3', 
@@ -1979,16 +2305,31 @@ def show_clustering_page():
                 df_viz = df_viz[df_viz['cluster'] >= 0]
             
             if color_by == "Cluster":
+                # Build HSV palette for cluster colors and a mapping
+                cluster_ids = sorted(df_viz['cluster'].unique())
+                # Create a categorical label column so Plotly treats clusters as discrete
+                df_viz['cluster_label'] = df_viz['cluster'].astype(str)
+                # Define explicit category order (string keys) to guarantee deterministic mapping
+                cluster_label_order = [str(cid) for cid in cluster_ids]
+                df_viz['cluster_label'] = pd.Categorical(df_viz['cluster_label'], categories=cluster_label_order, ordered=True)
+                n_cls = len(cluster_ids)
+                hsv_colors = make_hsv_palette(n_cls)
+                # Color map must have string keys matching the cluster_label values
+                color_map = {str(cid): hsv_colors[i] for i, cid in enumerate(cluster_ids)}
+
                 fig = px.scatter(
                     df_viz,
                     x='x',
                     y='y',
-                    color='cluster',
+                    color='cluster_label',
+                    color_discrete_map=color_map,
+                    symbol='cluster_label',
+                    symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=['title', 'roi_original', 'vote_average'],
-                    labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'cluster': 'Cluster'},
+                    labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'cluster_label': 'Cluster'},
                     title='Movie Clusters in 2D Space (colored by cluster)',
-                    color_continuous_scale='viridis'
+                    category_orders={'cluster_label': cluster_label_order}
                 )
             else:
                 title_suffix = "by cluster average ROI" if color_by == "ROI Cluster Average" else "by ROI"
@@ -2001,6 +2342,8 @@ def show_clustering_page():
                     x='x',
                     y='y',
                     color='roi',
+                    symbol='cluster',
+                    symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=hover_data,
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 
@@ -2010,7 +2353,32 @@ def show_clustering_page():
                     color_continuous_scale='RdYlGn'
                 )
         
-        fig.update_layout(height=700)
+        # Hide the built-in legend on the main chart and show two separate legend panels
+        fig.update_layout(height=700, showlegend=False)
+
+        # If we colored by cluster we build legend panels (colors and shapes)
+        if color_by == "Cluster":
+            try:
+                # cluster_ids and color_map were defined above in the Cluster branches
+                # If they aren't in scope, fall back to unique values from df_viz
+                cluster_ids = cluster_ids if 'cluster_ids' in locals() else sorted(df_viz['cluster'].unique())
+                color_map = color_map if 'color_map' in locals() else {cid: c for cid, c in zip(cluster_ids, make_hsv_palette(len(cluster_ids)))}
+
+                color_legend_fig = _make_color_legend_fig(cluster_ids, color_map)
+                shape_legend_fig = _make_shape_legend_fig(cluster_ids, SYMBOL_SEQUENCE)
+
+                # Display legends horizontally above the main chart
+                lcol, rcol = st.columns(2)
+                with lcol:
+                    st.markdown("**Color legend**")
+                    st.plotly_chart(color_legend_fig, use_container_width=True)
+                with rcol:
+                    st.markdown("**Shape legend**")
+                    st.plotly_chart(shape_legend_fig, use_container_width=True)
+            except Exception:
+                # If anything goes wrong building the separate legends, fall back to built-in legend
+                fig.update_layout(showlegend=True)
+
         st.plotly_chart(fig, width="stretch")
     
     # Tab 4: Cluster Representatives

@@ -85,6 +85,34 @@ class FeatureEngineer:
             bins=[0, 90, 120, 150, float('inf')], 
             labels=['short', 'medium', 'long', 'very_long']
         )
+
+        # 9b. Runtime binary windows centered every 30 minutes
+        # Create binary features covering the runtime distribution with windows
+        # centered on 30, 60, 90, ... minutes. Each window spans [center-15, center+15)
+        # The last window uses <= upper bound so the max runtime is included.
+        try:
+            runtimes = df_features['runtime'].dropna().astype(float)
+            if not runtimes.empty:
+                max_rt = float(runtimes.max())
+                # create centers at 30, 60, ... up to ceil(max_rt/30)*30
+                last_center = int(np.ceil(max_rt / 30.0) * 30)
+                centers = list(range(30, last_center + 1, 30))
+
+                for i, center in enumerate(centers):
+                    lower = center - 15
+                    upper = center + 15
+                    col_name = f"runtime_{int(lower)}_{int(upper)}"
+                    if i == len(centers) - 1:
+                        # include the upper bound in the last window
+                        df_features[col_name] = ((df_features['runtime'] >= lower) & (df_features['runtime'] <= upper)).astype(int)
+                    else:
+                        df_features[col_name] = ((df_features['runtime'] >= lower) & (df_features['runtime'] < upper)).astype(int)
+            else:
+                # No runtime info available; create a default window to avoid downstream failures
+                df_features['runtime_15_45'] = 0
+        except Exception:
+            # On any unexpected error, add a safe default column
+            df_features['runtime_15_45'] = 0
         
         # 10. Budget categories
         df_features['budget_category'] = pd.cut(
@@ -140,7 +168,10 @@ class FeatureEngineer:
         language_features = [col for col in df.columns if col.startswith('language_')]
         
         # Combine all features
-        feature_columns = numerical_features + genre_features + country_features + language_features
+        # Pick up runtime binary windows but exclude the categorical 'runtime_category'
+        runtime_binary_features = [col for col in df.columns if col.startswith('runtime_') and col != 'runtime_category']
+        # Combine all features (include runtime binary windows)
+        feature_columns = numerical_features + genre_features + country_features + language_features + runtime_binary_features
         
         # Filter features that exist in the dataframe
         feature_columns = [col for col in feature_columns if col in df.columns]
