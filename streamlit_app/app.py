@@ -70,6 +70,7 @@ def main():
         "Choose a page:",
         ["🏠 Home", "🔮 Predict ROI", "📊 Data Analysis", "📝 Semantic Analysis", "🎯 Thematic Clustering", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis"]
     )
+    # Note: per-plot selectors are used instead of a global sidebar plot selector.
     
     # Database connection check
     if not test_database_connection():
@@ -88,7 +89,7 @@ def main():
     # Prepare data for modeling
     df_clean = prepare_movies_for_modeling(df_movies)
     data_summary = get_data_summary(df_clean)
-    
+
     # Initialize session state
     if 'model_trainer' not in st.session_state:
         st.session_state.model_trainer = ROIModelTrainer()
@@ -112,6 +113,38 @@ def main():
         show_model_performance_page()
     elif page == "🔬 Sensitivity Analysis":
         show_sensitivity_analysis_page(df_clean, df_genres)
+
+
+def _get_target_column():
+    """Return the currently selected target column used by the feature engineer (defaults to 'roi')."""
+    try:
+        return getattr(st.session_state.feature_engineer, 'target_column', 'roi')
+    except Exception:
+        return 'roi'
+
+
+def _get_target_label():
+    """Return a human-friendly label for the selected target ('ROI' or 'Revenue')."""
+    col = _get_target_column()
+    return 'Revenue' if col == 'revenue' else 'ROI'
+
+
+def _plot_target_selector(scope_name: str = ""):
+    """Render a small per-plot selector that overrides the global sidebar plot target.
+
+    Returns (target_column, target_label) where target_column is 'roi' or 'revenue'.
+    The selector default is 'Global (use sidebar)'.
+    """
+    key = f"plot_target_override_{scope_name}"
+    choice = st.selectbox(
+        "Plot variable (for this chart)",
+        ["ROI", "Revenue"],
+        index=0,
+        key=key,
+        help="Choose whether this chart shows ROI or Revenue"
+    )
+    return ('revenue', 'Revenue') if choice == 'Revenue' else ('roi', 'ROI')
+    
 
 
 def show_home_page(data_summary, df_clean):
@@ -138,10 +171,13 @@ def show_home_page(data_summary, df_clean):
         )
     
     with col3:
+        target_col = _get_target_column()
+        target_label = _get_target_label()
+        avg_val = df_clean[target_col].mean() if (df_clean is not None and target_col in df_clean.columns) else data_summary.get('avg_roi', 0)
         st.metric(
-            label="Average ROI",
-            value=f"{data_summary.get('avg_roi', 0):.2f}",
-            help="Mean Return on Investment"
+            label=f"Average {target_label}",
+            value=f"{avg_val:.2f}",
+            help=f"Mean {target_label}"
         )
     
     with col4:
@@ -181,17 +217,19 @@ def show_home_page(data_summary, df_clean):
             st.plotly_chart(fig_genres, width="stretch")
     
     with col2:
-        # ROI distribution
+        # Target distribution
         if not df_clean.empty:
-            fig_roi = px.histogram(
+            tgt = _get_target_column()
+            label = _get_target_label()
+            fig_target = px.histogram(
                 df_clean,
-                x='roi',
+                x=tgt,
                 nbins=50,
-                title="ROI Distribution",
-                labels={'roi': 'ROI', 'count': 'Number of Movies'}
+                title=f"{label} Distribution",
+                labels={tgt: label, 'count': 'Number of Movies'}
             )
-            fig_roi.update_layout(height=400)
-            st.plotly_chart(fig_roi, width="stretch")
+            fig_target.update_layout(height=400)
+            st.plotly_chart(fig_target, width="stretch")
     
     # Instructions
     st.header("🚀 How to Use This App")
@@ -270,11 +308,20 @@ def show_prediction_page(df_clean, df_genres):
             # Create features for prediction
             X_pred = st.session_state.feature_engineer.create_prediction_features(movie_data)
             
-            # Make prediction
-            predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
-            
-            # Calculate predicted revenue
-            predicted_revenue = budget * (1 + predicted_roi)
+            # Make prediction (the trainer returns predictions in the original units of the trained target)
+            pred_val = st.session_state.model_trainer.predict_roi(X_pred)[0]
+
+            target_col = st.session_state.feature_engineer.target_column if hasattr(st.session_state, 'feature_engineer') else 'roi'
+            if target_col == 'roi':
+                predicted_roi = pred_val
+                # Calculate predicted revenue
+                predicted_revenue = budget * (1 + predicted_roi)
+            else:
+                # target is revenue
+                predicted_revenue = pred_val
+                # compute ROI from predicted revenue if budget available
+                predicted_roi = (predicted_revenue - budget) / budget if budget and budget > 0 else np.nan
+
             predicted_profit = predicted_revenue - budget
             
             # Display results
@@ -283,11 +330,21 @@ def show_prediction_page(df_clean, df_genres):
             col1, col2, col3 = st.columns(3)
             
             with col1:
+                # Show primary predicted value depending on trained target
+                if target_col == 'roi':
+                    title = 'Predicted ROI'
+                    value_html = f"{predicted_roi:.2f} ({predicted_roi*100:.1f}%)"
+                    color = 'green' if predicted_roi > 0 else 'red'
+                else:
+                    title = 'Predicted Revenue'
+                    value_html = f"${predicted_revenue:,.0f}"
+                    color = '#1f77b4'
+
                 st.markdown(f"""
                 <div class="prediction-card">
-                    <h3>Predicted ROI</h3>
-                    <h2 style="color: {'green' if predicted_roi > 0 else 'red'};">
-                        {predicted_roi:.2f} ({predicted_roi*100:.1f}%)
+                    <h3>{title}</h3>
+                    <h2 style="color: {color};">
+                        {value_html}
                     </h2>
                 </div>
                 """, unsafe_allow_html=True)
@@ -363,34 +420,56 @@ def show_overview_analysis(df_clean):
     
     st.subheader("📈 Dataset Overview")
     
+    # Per-plot target override
+    tgt_col, tgt_label = _plot_target_selector("overview")
+
+    # Ensure the dataframe has the requested target column (derive if possible)
+    def _ensure_target(df, tgt):
+        df = df.copy()
+        if tgt == 'revenue' and 'revenue' not in df.columns:
+            if 'roi' in df.columns and 'budget' in df.columns:
+                df['revenue'] = df['budget'] * (1 + df['roi'])
+        if tgt == 'roi' and 'roi' not in df.columns:
+            if 'revenue' in df.columns and 'budget' in df.columns:
+                # avoid divide by zero
+                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+        return df
+
+    df_plot = _ensure_target(df_clean, tgt_col)
+
     col1, col2 = st.columns(2)
     
     with col1:
-        # ROI distribution
-        fig_roi = px.histogram(
-            df_clean, x='roi', nbins=50,
-            title="ROI Distribution",
-            labels={'roi': 'ROI', 'count': 'Number of Movies'}
+        # Target distribution
+        tgt = tgt_col
+        label = tgt_label
+        fig_target = px.histogram(
+            df_clean, x=tgt, nbins=50,
+            title=f"{label} Distribution",
+            labels={tgt: label, 'count': 'Number of Movies'}
         )
-        st.plotly_chart(fig_roi, width="stretch")
+        st.plotly_chart(fig_target, width="stretch")
     
     with col2:
-        # Budget vs Revenue
+        # Budget vs selected target
         fig_budget = px.scatter(
-            df_clean, x='budget', y='revenue',
-            title="Budget vs Revenue",
-            labels={'budget': 'Budget (USD)', 'revenue': 'Revenue (USD)'},
+            df_plot, x='budget', y=tgt_col,
+            title=f"Budget vs {tgt_label}",
+            labels={'budget': 'Budget (USD)', tgt_col: f'{tgt_label} ({"USD" if tgt_col=="revenue" else "ratio"})'},
             opacity=0.6
         )
-        fig_budget.update_layout(
-            xaxis_type="log",
-            yaxis_type="log"
-        )
+        fig_budget.update_layout(xaxis_type="log")
+        if tgt_col == 'revenue':
+            fig_budget.update_layout(yaxis_type="log")
         st.plotly_chart(fig_budget, width="stretch")
     
-    # Top movies by ROI
-    st.subheader("🏆 Top Movies by ROI")
-    top_movies = df_clean.nlargest(10, 'roi')[['title', 'release_year', 'budget', 'revenue', 'roi']]
+    # Top movies by selected target
+    st.subheader(f"🏆 Top Movies by {tgt_label}")
+    tgt = tgt_col
+    cols = ['title', 'release_year', 'budget']
+    if tgt not in cols:
+        cols.append(tgt)
+    top_movies = df_plot.nlargest(10, tgt)[cols]
     st.dataframe(top_movies, width="stretch")
 
 
@@ -399,6 +478,22 @@ def show_financial_analysis(df_clean):
     
     st.subheader("💰 Financial Analysis")
     
+    # Per-plot target override
+    tgt_col, tgt_label = _plot_target_selector("financial")
+
+    # Ensure target column exists for plotting
+    def _ensure_target(df, tgt):
+        df = df.copy()
+        if tgt == 'revenue' and 'revenue' not in df.columns:
+            if 'roi' in df.columns and 'budget' in df.columns:
+                df['revenue'] = df['budget'] * (1 + df['roi'])
+        if tgt == 'roi' and 'roi' not in df.columns:
+            if 'revenue' in df.columns and 'budget' in df.columns:
+                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+        return df
+
+    df_plot = _ensure_target(df_clean, tgt_col)
+
     col1, col2 = st.columns(2)
     
     with col1:
@@ -412,14 +507,15 @@ def show_financial_analysis(df_clean):
         st.plotly_chart(fig_budget, width="stretch")
     
     with col2:
-        # Revenue distribution
-        fig_revenue = px.box(
-            df_clean, y='revenue',
-            title="Revenue Distribution",
-            labels={'revenue': 'Revenue (USD)'}
+        # Selected target distribution
+        fig_target = px.box(
+            df_plot, y=tgt_col,
+            title=f"{tgt_label} Distribution",
+            labels={tgt_col: f"{tgt_label} ({'USD' if tgt_col=='revenue' else 'ratio'})"}
         )
-        fig_revenue.update_layout(yaxis_type="log")
-        st.plotly_chart(fig_revenue, width="stretch")
+        if tgt_col == 'revenue':
+            fig_target.update_layout(yaxis_type="log")
+        st.plotly_chart(fig_target, width="stretch")
     
     # Financial metrics
     st.subheader("📊 Financial Metrics")
@@ -429,9 +525,20 @@ def show_financial_analysis(df_clean):
     with col1:
         st.metric("Avg Budget", f"${df_clean['budget'].mean():,.0f}")
     with col2:
-        st.metric("Avg Revenue", f"${df_clean['revenue'].mean():,.0f}")
+        # Keep Avg Revenue metric for quick reference if revenue exists
+        if 'revenue' in df_clean.columns:
+            st.metric("Avg Revenue", f"${df_clean['revenue'].mean():,.0f}")
+        else:
+            st.metric("Avg Revenue", "N/A")
     with col3:
-        st.metric("Avg ROI", f"{df_clean['roi'].mean():.2f}")
+        tgt = tgt_col
+        lbl = tgt_label
+        avg_val = df_plot[tgt].mean() if tgt in df_plot.columns else np.nan
+        # show appropriately formatted value for revenue vs roi
+        if tgt == 'revenue':
+            st.metric(f"Avg {lbl}", f"${avg_val:,.0f}")
+        else:
+            st.metric(f"Avg {lbl}", f"{avg_val:.2f}")
     with col4:
         st.metric("Profitability Rate", f"{df_clean['is_profitable'].mean()*100:.1f}%")
 
@@ -440,6 +547,9 @@ def show_genre_analysis(df_clean):
     """Show genre analysis."""
     
     st.subheader("🎭 Genre Analysis")
+
+    # Per-plot target override
+    tgt_col, tgt_label = _plot_target_selector("genre")
     
     # Genre frequency
     genre_counts = df_clean['genres'].str.split(', ').explode().value_counts().head(15)
@@ -453,21 +563,36 @@ def show_genre_analysis(df_clean):
     )
     st.plotly_chart(fig_genres, width="stretch")
     
-    # Genre vs ROI
+    # Genre vs selected target
+    # Ensure target available
+    def _ensure_target(df, tgt):
+        df = df.copy()
+        if tgt == 'revenue' and 'revenue' not in df.columns:
+            if 'roi' in df.columns and 'budget' in df.columns:
+                df['revenue'] = df['budget'] * (1 + df['roi'])
+        if tgt == 'roi' and 'roi' not in df.columns:
+            if 'revenue' in df.columns and 'budget' in df.columns:
+                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+        return df
+
+    df_plot = _ensure_target(df_clean, tgt_col)
     genre_roi = []
     for genre in genre_counts.index:
-        genre_movies = df_clean[df_clean['genres'].str.contains(genre, na=False)]
-        avg_roi = genre_movies['roi'].mean()
-        genre_roi.append({'genre': genre, 'avg_roi': avg_roi, 'count': len(genre_movies)})
+        genre_movies = df_plot[df_plot['genres'].str.contains(genre, na=False)]
+        tgt = tgt_col
+        avg_val = genre_movies[tgt].mean() if tgt in genre_movies.columns else np.nan
+        genre_roi.append({'genre': genre, 'avg_val': avg_val, 'count': len(genre_movies)})
     
     genre_roi_df = pd.DataFrame(genre_roi)
     genre_roi_df = genre_roi_df[genre_roi_df['count'] >= 10]  # Filter genres with at least 10 movies
     
+    # use per-plot label
+    tgt_label = tgt_label
     fig_genre_roi = px.bar(
-        genre_roi_df, x='avg_roi', y='genre',
+        genre_roi_df, x='avg_val', y='genre',
         orientation='h',
-        title="Average ROI by Genre (min 10 movies)",
-        labels={'avg_roi': 'Average ROI', 'genre': 'Genre'}
+        title=f"Average {tgt_label} by Genre (min 10 movies)",
+        labels={'avg_val': f'Average {tgt_label}', 'genre': 'Genre'}
     )
     st.plotly_chart(fig_genre_roi, width="stretch")
 
@@ -476,6 +601,21 @@ def show_temporal_analysis(df_clean):
     """Show temporal analysis."""
     
     st.subheader("📅 Temporal Analysis")
+
+    # Per-plot target override
+    tgt_col, tgt_label = _plot_target_selector("temporal")
+
+    def _ensure_target(df, tgt):
+        df = df.copy()
+        if tgt == 'revenue' and 'revenue' not in df.columns:
+            if 'roi' in df.columns and 'budget' in df.columns:
+                df['revenue'] = df['budget'] * (1 + df['roi'])
+        if tgt == 'roi' and 'roi' not in df.columns:
+            if 'revenue' in df.columns and 'budget' in df.columns:
+                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+        return df
+
+    df_plot = _ensure_target(df_clean, tgt_col)
     
     # Movies by year
     yearly_counts = df_clean.groupby('release_year').size().reset_index(name='count')
@@ -489,12 +629,13 @@ def show_temporal_analysis(df_clean):
     
     # ROI by decade
     df_clean['decade'] = (df_clean['release_year'] // 10) * 10
-    decade_roi = df_clean.groupby('decade')['roi'].mean().reset_index()
-    
+    tgt = tgt_col
+    decade_roi = df_plot.groupby('decade')[tgt].mean().reset_index()
+
     fig_decade = px.bar(
-        decade_roi, x='decade', y='roi',
-        title="Average ROI by Decade",
-        labels={'decade': 'Decade', 'roi': 'Average ROI'}
+        decade_roi, x='decade', y=tgt,
+        title=f"Average {tgt_label} by Decade",
+        labels={'decade': 'Decade', tgt: f'Average {tgt_label}'}
     )
     st.plotly_chart(fig_decade, width="stretch")
 
@@ -503,6 +644,21 @@ def show_country_analysis(df_clean):
     """Show country analysis."""
     
     st.subheader("🌍 Country Analysis")
+
+    # Per-plot target override
+    tgt_col, tgt_label = _plot_target_selector("country")
+
+    def _ensure_target(df, tgt):
+        df = df.copy()
+        if tgt == 'revenue' and 'revenue' not in df.columns:
+            if 'roi' in df.columns and 'budget' in df.columns:
+                df['revenue'] = df['budget'] * (1 + df['roi'])
+        if tgt == 'roi' and 'roi' not in df.columns:
+            if 'revenue' in df.columns and 'budget' in df.columns:
+                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+        return df
+
+    df_plot = _ensure_target(df_clean, tgt_col)
     
     # Top countries by movie count
     country_counts = df_clean['main_country'].value_counts().head(15)
@@ -516,16 +672,18 @@ def show_country_analysis(df_clean):
     )
     st.plotly_chart(fig_countries, width="stretch")
     
-    # ROI by country
-    country_roi = df_clean.groupby('main_country')['roi'].agg(['mean', 'count']).reset_index()
+    # Target by country
+    tgt = tgt_col
+    country_roi = df_plot.groupby('main_country')[tgt].agg(['mean', 'count']).reset_index()
     country_roi = country_roi[country_roi['count'] >= 20]  # Filter countries with at least 20 movies
     country_roi = country_roi.sort_values('mean', ascending=False).head(15)
-    
+    tgt_label = _get_target_label()
+
     fig_country_roi = px.bar(
         country_roi, x='mean', y='main_country',
         orientation='h',
-        title="Average ROI by Country (min 20 movies)",
-        labels={'mean': 'Average ROI', 'main_country': 'Country'}
+        title=f"Average {tgt_label} by Country (min 20 movies)",
+        labels={'mean': f'Average {tgt_label}', 'main_country': 'Country'}
     )
     st.plotly_chart(fig_country_roi, width="stretch")
 
@@ -550,13 +708,38 @@ def show_model_training_page(df_clean):
     
     with col2:
         random_state = st.number_input("Random State", min_value=0, max_value=1000, value=42)
-        # ROI truncation percentiles
+        # Target variable selection (ROI or Revenue)
+        target_variable = st.selectbox("Target variable", ["ROI", "Revenue"], index=0, help="Choose whether to predict ROI or revenue directly")
+        # Truncation percentiles (applies to the selected target)
         roi_lower_pct = st.number_input(
-            "ROI lower percentile (0-100)", min_value=0, max_value=100, value=1, step=1, key="roi_lower_pct"
+            f"{target_variable} lower percentile (0-100)", min_value=0, max_value=100, value=1, step=1, key="roi_lower_pct"
         )
         roi_upper_pct = st.number_input(
-            "ROI upper percentile (0-100)", min_value=0, max_value=100, value=99, step=1, key="roi_upper_pct"
+            f"{target_variable} upper percentile (0-100)", min_value=0, max_value=100, value=99, step=1, key="roi_upper_pct"
         )
+        # Ensure FeatureEngineer uses the selected target column
+        selected_col = 'roi' if target_variable == 'ROI' else 'revenue'
+        st.session_state.feature_engineer.target_column = selected_col
+        # Target transform selection (applies to the selected target variable)
+        target_transform_label = st.selectbox(
+            "Target transform",
+            [
+                'Raw',
+                'Signed log (sign * log1p(abs(x)))',
+                'Log + shift (log1p(x + shift))',
+                'asinh (arcsinh)'
+            ],
+            index=1,
+            help="Choose how to transform the target before training"
+        )
+        transform_params = {}
+        if target_transform_label.startswith('Log + shift'):
+            # default shift: ensure positive inside log for min value in selected target
+            selected_col = 'roi' if target_variable == 'ROI' else 'revenue'
+            min_target = float(df_clean[selected_col].min()) if selected_col in df_clean.columns else 0.0
+            default_shift = max(1e-6, -min_target + 1e-6) if min_target <= 0 else 0.0
+            shift_val = st.number_input("Shift (added before log1p)", value=float(default_shift), step=0.1)
+            transform_params['shift'] = float(shift_val)
         st.caption("Values outside the selected percentile range will be truncated to the percentile value before training.")
     
     # Debug features section
@@ -756,11 +939,12 @@ def show_model_training_page(df_clean):
                     y_test = y_test.clip(lower=lower_val, upper=upper_val)
 
                     st.info(
-                        f"ROI truncation applied: {roi_lower_pct}th -> {lower_val:.3f}, {roi_upper_pct}th -> {upper_val:.3f}. "
+                        f"{target_variable} truncation applied: {roi_lower_pct}th -> {lower_val:.3f}, {roi_upper_pct}th -> {upper_val:.3f}. "
                         f"Train clipped: below={train_below}, above={train_above}; Test clipped: below={test_below}, above={test_above}."
                     )
                 except Exception as e:
-                    st.error(f"❌ Error applying ROI truncation: {e}")
+                    st.error(f"❌ Error applying {target_variable} truncation: {e}")
+                    return
                     return
                 
                 # Apply feature selection if enabled
@@ -783,9 +967,27 @@ def show_model_training_page(df_clean):
                 else:
                     st.info(f"🔍 Training with all {len(feature_names)} features")
                 
+                # Map UI label to internal transform key
+                label_to_key = {
+                    'Raw': 'raw',
+                    'Signed log (sign * log1p(abs(x)))': 'signed_log1p',
+                    'Log + shift (log1p(x + shift))': 'log_plus_shift',
+                    'asinh (arcsinh)': 'asinh'
+                }
+                selected_transform = label_to_key.get(target_transform_label, 'signed_log1p')
+
+                # record which target name the trainer is using (for UI labeling)
+                st.session_state.model_trainer.target_name = selected_col
+
                 # Train model
                 metrics = st.session_state.model_trainer.train_model(
-                    X_train, y_train, X_test, y_test, optimize_hyperparams=optimize_hyperparams
+                    X_train,
+                    y_train,
+                    X_test,
+                    y_test,
+                    optimize_hyperparams=optimize_hyperparams,
+                    target_transform=selected_transform,
+                    transform_params=transform_params or None,
                 )
                 
                 st.success("✅ Model trained successfully!")
@@ -903,9 +1105,17 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
         st.warning("⚠️ Model not trained yet. Please train the model first in the 'Model Training' page.")
         return
     
-    st.markdown("""
-    This page shows how predicted ROI changes when varying individual features while keeping others constant.
-    This helps understand which factors have the most impact on ROI predictions.
+    tgt_col = _get_target_column()
+    tgt_label = _get_target_label()
+
+    # Temporary debug output
+    st.write("DEBUG: Trained target column:", tgt_col)
+    st.write("DEBUG: Model target_transform:", getattr(st.session_state.model_trainer, 'target_transform', 'N/A'))
+    st.write("DEBUG: Model transform_params:", getattr(st.session_state.model_trainer, 'transform_params', {}))
+
+    st.markdown(f"""
+    This page shows how predicted {tgt_label} changes when varying individual features while keeping others constant.
+    This helps understand which factors have the most impact on {tgt_label} predictions.
     """)
     
     # Get baseline values from user
@@ -965,56 +1175,91 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
                 st.write(f"**Adult Content:** {baseline_adult}")
                 st.write(f"**Genres:** {', '.join(baseline_genres)}")
         
-        # Generate budget range
-        budget_min = st.number_input("Min Budget", min_value=100000, value=100000, step=100000, key="budget_min")
-        budget_max = st.number_input("Max Budget", min_value=budget_min, value=100000000, step=1000000, key="budget_max")
-        budget_steps = st.slider("Number of points", min_value=10, max_value=100, value=100, key="budget_steps")
-        
-        budgets = np.linspace(budget_min, budget_max, budget_steps)
-        roi_predictions = []
-        
-        with st.spinner("Calculating predictions..."):
-            for budget in budgets:
-                movie = baseline_movie.copy()
-                movie['budget'] = budget
-                
-                try:
-                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
-                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
-                    roi_predictions.append(predicted_roi)
-                except Exception as e:
-                    st.error(f"Error predicting for budget {budget}: {str(e)}")
-                    roi_predictions.append(None)
-        
+    # Per-plot target selection (ROI or Revenue)
+    plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="budget_plot_target")
+    plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+    plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
+
+    # Generate budget range
+    budget_min = st.number_input("Min Budget", min_value=100000, value=100000, step=100000, key="budget_min")
+    budget_max = st.number_input("Max Budget", min_value=budget_min, value=100000000, step=1000000, key="budget_max")
+    budget_steps = st.slider("Number of points", min_value=10, max_value=100, value=100, key="budget_steps")
+
+    budgets = np.linspace(budget_min, budget_max, budget_steps)
+    roi_predictions = []
+
+    with st.spinner("Calculating predictions..."):
+        for budget in budgets:
+            movie = baseline_movie.copy()
+            movie['budget'] = budget
+
+            try:
+                X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                pred_raw = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                roi_predictions.append(pred_raw)
+            except Exception as e:
+                st.error(f"Error predicting for budget {budget}: {str(e)}")
+                roi_predictions.append(None)
+
+    # Convert predictions to chosen plot target taking into account how the model was trained
+    trained_target = tgt_col  # 'roi' or 'revenue' as used when training
+    # raw predictions are in trained_target units
+    if trained_target == plot_col:
+        # no conversion needed
+        pred_vals = [np.nan if p is None else p for p in roi_predictions]
+    elif trained_target == 'roi' and plot_col == 'revenue':
+        # convert ROI -> revenue per budget point: revenue = ROI * (budget + 1) + budget
+        pred_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p, b in zip(roi_predictions, budgets)]
+    elif trained_target == 'revenue' and plot_col == 'roi':
+        # convert revenue -> ROI per budget point: ROI = (revenue - budget) / (budget + 1)
+        pred_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p, b in zip(roi_predictions, budgets)]
+    else:
+        pred_vals = [np.nan if p is None else p for p in roi_predictions]
+
+    # Temporary debug output for budget analysis
+    if len(roi_predictions) > 0:
+        st.write("DEBUG Budget: Sample raw prediction:", roi_predictions[0])
+        st.write("DEBUG Budget: Sample converted prediction:", pred_vals[0] if len(pred_vals) > 0 else "N/A")
+
         # Plot
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=budgets, y=roi_predictions, mode='lines+markers', name='Predicted ROI'))
-        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.add_trace(go.Scatter(x=budgets, y=pred_vals, mode='lines+markers', name=f'Predicted {plot_label}'))
+        if plot_col == 'roi':
+            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
         fig.update_layout(
-            title="ROI vs Budget",
+            title=f"{plot_label} vs Budget",
             xaxis_title="Budget (USD)",
-            yaxis_title="Predicted ROI",
+            yaxis_title=f"Predicted {plot_label}",
             height=500
         )
         st.plotly_chart(fig, width="stretch")
-        
+
         # Summary statistics (ignore failed predictions)
-        valid_preds = [p for p in roi_predictions if p is not None and not (isinstance(p, float) and np.isnan(p))]
+        valid_preds = [p for p in pred_vals if p is not None and not (isinstance(p, float) and np.isnan(p))]
         col1, col2, col3 = st.columns(3)
         if valid_preds:
             with col1:
-                st.metric("Min ROI", f"{min(valid_preds):.2f}")
+                if plot_col == 'revenue':
+                    st.metric(f"Min {plot_label}", f"${min(valid_preds):,.0f}")
+                else:
+                    st.metric(f"Min {plot_label}", f"{min(valid_preds):.2f}")
             with col2:
-                st.metric("Max ROI", f"{max(valid_preds):.2f}")
+                if plot_col == 'revenue':
+                    st.metric(f"Max {plot_label}", f"${max(valid_preds):,.0f}")
+                else:
+                    st.metric(f"Max {plot_label}", f"{max(valid_preds):.2f}")
             with col3:
-                st.metric("ROI Range", f"{max(valid_preds) - min(valid_preds):.2f}")
+                if plot_col == 'revenue':
+                    st.metric(f"{plot_label} Range", f"${max(valid_preds) - min(valid_preds):,.0f}")
+                else:
+                    st.metric(f"{plot_label} Range", f"{max(valid_preds) - min(valid_preds):.2f}")
         else:
             with col1:
-                st.metric("Min ROI", "N/A")
+                st.metric(f"Min {tgt_label}", "N/A")
             with col2:
-                st.metric("Max ROI", "N/A")
+                st.metric(f"Max {tgt_label}", "N/A")
             with col3:
-                st.metric("ROI Range", "N/A")
+                st.metric(f"{tgt_label} Range", "N/A")
     
     # Runtime Analysis
     with analysis_tabs[1]:
@@ -1035,51 +1280,79 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
         runtime_max = st.number_input("Max Runtime (minutes)", min_value=runtime_min, value=270, step=5, key="runtime_max")
         runtime_steps = st.slider("Number of points", min_value=10, max_value=50, value=50, key="runtime_steps")
         
+        # Per-plot target selection (ROI or Revenue)
+        plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="runtime_plot_target")
+        plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+        plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
+
         runtimes = np.linspace(runtime_min, runtime_max, runtime_steps)
-        roi_predictions = []
-        
+        roi_preds = []
+
         with st.spinner("Calculating predictions..."):
             for runtime in runtimes:
                 movie = baseline_movie.copy()
                 movie['runtime'] = int(runtime)
-                
+
                 try:
                     X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
-                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
-                    roi_predictions.append(predicted_roi)
+                    pred_val = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                    roi_preds.append(pred_val)
                 except Exception as e:
                     st.error(f"Error predicting for runtime {runtime}: {str(e)}")
-                    roi_predictions.append(None)
-        
+                    roi_preds.append(None)
+
+        # Convert to chosen plot target (use baseline budget when converting between ROI and Revenue)
+        trained_target = tgt_col
+        if trained_target == plot_col:
+            plot_vals = [np.nan if p is None else p for p in roi_preds]
+        elif trained_target == 'roi' and plot_col == 'revenue':
+            b = baseline_budget
+            plot_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p in roi_preds]
+        elif trained_target == 'revenue' and plot_col == 'roi':
+            b = baseline_budget
+            plot_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p in roi_preds]
+        else:
+            plot_vals = [np.nan if p is None else p for p in roi_preds]
+
         # Plot
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=runtimes, y=roi_predictions, mode='lines+markers', name='Predicted ROI'))
-        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.add_trace(go.Scatter(x=runtimes, y=plot_vals, mode='lines+markers', name=f'Predicted {plot_label}'))
+        if plot_col == 'roi':
+            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
         fig.update_layout(
-            title="ROI vs Runtime",
+            title=f"{plot_label} vs Runtime",
             xaxis_title="Runtime (minutes)",
-            yaxis_title="Predicted ROI",
+            yaxis_title=f"Predicted {plot_label}",
             height=500
         )
         st.plotly_chart(fig, width="stretch")
-        
+
         # Summary statistics (ignore failed predictions)
-        valid_preds = [p for p in roi_predictions if p is not None and not (isinstance(p, float) and np.isnan(p))]
+        valid_preds = [p for p in plot_vals if p is not None and not (isinstance(p, float) and np.isnan(p))]
         col1, col2, col3 = st.columns(3)
         if valid_preds:
             with col1:
-                st.metric("Min ROI", f"{min(valid_preds):.2f}")
+                if plot_col == 'revenue':
+                    st.metric(f"Min {plot_label}", f"${min(valid_preds):,.0f}")
+                else:
+                    st.metric(f"Min {plot_label}", f"{min(valid_preds):.2f}")
             with col2:
-                st.metric("Max ROI", f"{max(valid_preds):.2f}")
+                if plot_col == 'revenue':
+                    st.metric(f"Max {plot_label}", f"${max(valid_preds):,.0f}")
+                else:
+                    st.metric(f"Max {plot_label}", f"{max(valid_preds):.2f}")
             with col3:
-                st.metric("ROI Range", f"{max(valid_preds) - min(valid_preds):.2f}")
+                if plot_col == 'revenue':
+                    st.metric(f"{plot_label} Range", f"${max(valid_preds) - min(valid_preds):,.0f}")
+                else:
+                    st.metric(f"{plot_label} Range", f"{max(valid_preds) - min(valid_preds):.2f}")
         else:
             with col1:
-                st.metric("Min ROI", "N/A")
+                st.metric(f"Min {plot_label}", "N/A")
             with col2:
-                st.metric("Max ROI", "N/A")
+                st.metric(f"Max {plot_label}", "N/A")
             with col3:
-                st.metric("ROI Range", "N/A")
+                st.metric(f"{plot_label} Range", "N/A")
     
     # Country Analysis
     with analysis_tabs[2]:
@@ -1099,45 +1372,63 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
         top_n_countries = st.slider("Number of top countries to analyze", min_value=5, max_value=20, value=10, key="country_n")
         countries = df_clean['main_country'].value_counts().head(top_n_countries).index.tolist()
         
-        roi_predictions = []
-        
+        pred_vals = []
+
         with st.spinner("Calculating predictions..."):
             for country in countries:
                 movie = baseline_movie.copy()
                 movie['main_country'] = country
                 movie['production_countries'] = f'[{{"name": "{country}"}}]'
-                
+
                 try:
                     X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
-                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
-                    roi_predictions.append(predicted_roi)
+                    pred = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                    pred_vals.append(pred)
                 except Exception as e:
                     st.error(f"Error predicting for country {country}: {str(e)}")
-                    roi_predictions.append(None)
-        
-    # Plot (replace None with NaN so plot handles missing values)
-    y_vals = [np.nan if p is None else p for p in roi_predictions]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=countries, y=y_vals, name='Predicted ROI'))
-    fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
-    fig.update_layout(
-        title="ROI by Production Country",
-        xaxis_title="Country",
-        yaxis_title="Predicted ROI",
-        height=500
-    )
-    st.plotly_chart(fig, width="stretch")
+                    pred_vals.append(None)
 
-    # Best and worst (handle missing values)
-    country_roi_df = pd.DataFrame({'Country': countries, 'ROI': [np.nan if p is None else p for p in roi_predictions]})
-    country_roi_df = country_roi_df.sort_values('ROI', ascending=False, na_position='last')
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Top 5 Countries by ROI**")
-        st.dataframe(country_roi_df.head(5), width="stretch")
-    with col2:
-        st.markdown("**Bottom 5 Countries by ROI**")
-        st.dataframe(country_roi_df.tail(5), width="stretch")
+        # Per-plot target selection (ROI or Revenue)
+        plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="country_plot_target")
+        plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+        plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
+
+        # Plot (replace None with NaN so plot handles missing values)
+        trained_target = tgt_col
+        if trained_target == plot_col:
+            y_vals = [np.nan if p is None else p for p in pred_vals]
+        elif trained_target == 'roi' and plot_col == 'revenue':
+            b = baseline_budget
+            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p in pred_vals]
+        elif trained_target == 'revenue' and plot_col == 'roi':
+            b = baseline_budget
+            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p in pred_vals]
+        else:
+            y_vals = [np.nan if p is None else p for p in pred_vals]
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=countries, y=y_vals, name=f'Predicted {plot_label}'))
+        if plot_col == 'roi':
+            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.update_layout(
+            title=f"{plot_label} by Production Country",
+            xaxis_title="Country",
+            yaxis_title=f"Predicted {plot_label}",
+            height=500
+        )
+        st.plotly_chart(fig, width="stretch")
+
+        # Best and worst (handle missing values)
+        country_df = pd.DataFrame({'Country': countries, plot_label: y_vals})
+        # Sort by the predicted value (NaNs last)
+        country_df = country_df.sort_values(plot_label, ascending=False, na_position='last')
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"**Top 5 Countries by {plot_label}**")
+            st.dataframe(country_df.head(5), width="stretch")
+        with col2:
+            st.markdown(f"**Bottom 5 Countries by {plot_label}**")
+            st.dataframe(country_df.tail(5), width="stretch")
     
     # Language Analysis
     with analysis_tabs[3]:
@@ -1156,43 +1447,61 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
         
         top_n_languages = st.slider("Number of top languages to analyze", min_value=5, max_value=15, value=10, key="language_n")
         languages_list = df_clean['original_language'].value_counts().head(top_n_languages).index.tolist()
-        
-        roi_predictions = []
-        
+
+        pred_vals = []
+
         with st.spinner("Calculating predictions..."):
             for lang in languages_list:
                 movie = baseline_movie.copy()
                 movie['original_language'] = lang
-                
+
                 try:
                     X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
-                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
-                    roi_predictions.append(predicted_roi)
+                    pred = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                    pred_vals.append(pred)
                 except Exception as e:
                     st.error(f"Error predicting for language {lang}: {str(e)}")
-                    roi_predictions.append(None)
-        
+                    pred_vals.append(None)
+
+        # Per-plot target selection (ROI or Revenue)
+        plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="language_plot_target")
+        plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+        plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
+
         # Plot
+        trained_target = tgt_col
+        if trained_target == plot_col:
+            y_vals = [np.nan if p is None else p for p in pred_vals]
+        elif trained_target == 'roi' and plot_col == 'revenue':
+            b = baseline_budget
+            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p in pred_vals]
+        elif trained_target == 'revenue' and plot_col == 'roi':
+            b = baseline_budget
+            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p in pred_vals]
+        else:
+            y_vals = [np.nan if p is None else p for p in pred_vals]
+
         fig = go.Figure()
-        fig.add_trace(go.Bar(x=languages_list, y=roi_predictions, name='Predicted ROI'))
-        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.add_trace(go.Bar(x=languages_list, y=y_vals, name=f'Predicted {plot_label}'))
+        if plot_col == 'roi':
+            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
         fig.update_layout(
-            title="ROI by Original Language",
+            title=f"{plot_label} by Original Language",
             xaxis_title="Language",
-            yaxis_title="Predicted ROI",
+            yaxis_title=f"Predicted {plot_label}",
             height=500
         )
         st.plotly_chart(fig, width="stretch")
-        
+
         # Best and worst
-        language_roi_df = pd.DataFrame({'Language': languages_list, 'ROI': roi_predictions}).sort_values('ROI', ascending=False)
+        language_df = pd.DataFrame({'Language': languages_list, plot_label: y_vals}).sort_values(plot_label, ascending=False)
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**Top 5 Languages by ROI**")
-            st.dataframe(language_roi_df.head(5), width="stretch")
+            st.markdown(f"**Top 5 Languages by {plot_label}**")
+            st.dataframe(language_df.head(5), width="stretch")
         with col2:
-            st.markdown("**Bottom 5 Languages by ROI**")
-            st.dataframe(language_roi_df.tail(5), width="stretch")
+            st.markdown(f"**Bottom 5 Languages by {plot_label}**")
+            st.dataframe(language_df.tail(5), width="stretch")
     
     # Genre Analysis
     with analysis_tabs[4]:
@@ -1212,42 +1521,60 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
                 st.write(f"**Adult Content:** {baseline_adult}")
         
         genres_to_test = all_genres if all_genres else []
-        roi_predictions = []
-        
+        pred_vals = []
+
         with st.spinner("Calculating predictions..."):
             for genre in genres_to_test:
                 movie = baseline_movie.copy()
                 movie['genres'] = genre  # Single genre
-                
+
                 try:
                     X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
-                    predicted_roi = st.session_state.model_trainer.predict_roi(X_pred)[0]
-                    roi_predictions.append(predicted_roi)
+                    pred = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                    pred_vals.append(pred)
                 except Exception as e:
-                    roi_predictions.append(None)
-        
+                    pred_vals.append(None)
+
+        # Per-plot target selection (ROI or Revenue)
+        plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="genre_plot_target")
+        plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+        plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
+
         # Plot
-        genre_roi_df = pd.DataFrame({'Genre': genres_to_test, 'ROI': roi_predictions}).sort_values('ROI', ascending=False)
-        
+        trained_target = tgt_col
+        if trained_target == plot_col:
+            genre_vals = [np.nan if p is None else p for p in pred_vals]
+        elif trained_target == 'roi' and plot_col == 'revenue':
+            b = baseline_budget
+            genre_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p in pred_vals]
+        elif trained_target == 'revenue' and plot_col == 'roi':
+            b = baseline_budget
+            genre_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p in pred_vals]
+        else:
+            genre_vals = [np.nan if p is None else p for p in pred_vals]
+
+        genre_df = pd.DataFrame({'Genre': genres_to_test, plot_label: genre_vals}).sort_values(plot_label, ascending=False)
+
         fig = go.Figure()
-        fig.add_trace(go.Bar(x=genre_roi_df['Genre'], y=genre_roi_df['ROI'], name='Predicted ROI'))
-        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        fig.add_trace(go.Bar(x=genre_df['Genre'], y=genre_df[plot_label], name=f'Predicted {plot_label}'))
+        if plot_col == 'roi':
+            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
         fig.update_layout(
-            title="ROI by Genre (Individual)",
+            title=f"{plot_label} by Genre (Individual)",
             xaxis_title="Genre",
-            yaxis_title="Predicted ROI",
+            yaxis_title=f"Predicted {plot_label}",
             height=500
         )
         st.plotly_chart(fig, width="stretch")
-        
+
         # Best and worst
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**Top 5 Genres by ROI**")
-            st.dataframe(genre_roi_df.head(5), width="stretch")
+            st.markdown(f"**Top 5 Genres by {plot_label}**")
+            st.dataframe(genre_df.head(5), width="stretch")
         with col2:
-            st.markdown("**Bottom 5 Genres by ROI**")
-            st.dataframe(genre_roi_df.tail(5), width="stretch")
+            st.markdown(f"**Bottom 5 Genres by {plot_label}**")
+            st.dataframe(genre_df.tail(5), width="stretch")
 
 
 def show_semantic_analysis_page():
@@ -1281,7 +1608,13 @@ def show_semantic_analysis_page():
     with col1:
         st.metric("Movies Analyzed", f"{len(df_semantic):,}")
     with col2:
-        st.metric("Avg ROI", f"{df_semantic['roi'].mean():.2f}")
+        tgt = _get_target_column()
+        lbl = _get_target_label()
+        avg_val = df_semantic[tgt].mean() if tgt in df_semantic.columns else df_semantic['roi'].mean()
+        if tgt == 'revenue':
+            st.metric(f"Avg {lbl}", f"${avg_val:,.0f}")
+        else:
+            st.metric(f"Avg {lbl}", f"{avg_val:.2f}")
     with col3:
         st.metric("With Keywords", f"{df_semantic['keywords'].notna().sum():,}")
     with col4:
@@ -1352,7 +1685,8 @@ def show_semantic_analysis_page():
         top_corr_n = st.slider("Terms to show", 10, 30, 15, key="corr_slider")
         
         with st.spinner("Calculating correlations..."):
-            roi_values = df_docs.loc[df_docs.index, 'roi']
+            tgt = _get_target_column()
+            roi_values = df_docs.loc[df_docs.index, tgt]
             correlations = tfidf.correlate_with_target(
                 roi_values,
                 method=correlation_method,
@@ -1380,9 +1714,10 @@ def show_semantic_analysis_page():
         top_seg_n = st.slider("Terms per segment", 10, 25, 15, key="seg_terms_slider")
         
         with st.spinner("Analyzing segments..."):
+            tgt = _get_target_column()
             segments = tfidf.analyze_roi_segments(
                 df_docs,
-                roi_column='roi',
+                roi_column=tgt,
                 n_segments=n_segments,
                 top_terms_per_segment=top_seg_n
             )
@@ -1414,21 +1749,23 @@ def show_semantic_analysis_page():
         """)
         
         # ROI threshold selection
+        tgt = _get_target_column()
+        tgt_label = _get_target_label()
         roi_threshold = st.slider(
-            "ROI threshold for high/low split",
-            float(df_docs['roi'].min()),
-            float(df_docs['roi'].max()),
-            float(df_docs['roi'].median()),
+            f"{tgt_label} threshold for high/low split",
+            float(df_docs[tgt].min()),
+            float(df_docs[tgt].max()),
+            float(df_docs[tgt].median()),
             0.1
         )
-        
-        high_roi_docs = df_docs[df_docs['roi'] >= roi_threshold]['document']
-        low_roi_docs = df_docs[df_docs['roi'] < roi_threshold]['document']
+
+        high_roi_docs = df_docs[df_docs[tgt] >= roi_threshold]['document']
+        low_roi_docs = df_docs[df_docs[tgt] < roi_threshold]['document']
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.markdown(f"**High ROI (>= {roi_threshold:.2f})** - {len(high_roi_docs)} movies")
+            st.markdown(f"**High {tgt_label} (>= {roi_threshold:.2f})** - {len(high_roi_docs)} movies")
             with st.spinner("Generating word cloud..."):
                 fig_wc_high = create_wordcloud(
                     high_roi_docs,
@@ -1441,7 +1778,7 @@ def show_semantic_analysis_page():
                     st.info("Not enough data for word cloud")
         
         with col2:
-            st.markdown(f"**Low ROI (< {roi_threshold:.2f})** - {len(low_roi_docs)} movies")
+            st.markdown(f"**Low {tgt_label} (< {roi_threshold:.2f})** - {len(low_roi_docs)} movies")
             with st.spinner("Generating word cloud..."):
                 fig_wc_low = create_wordcloud(
                     low_roi_docs,
@@ -1516,11 +1853,12 @@ def show_semantic_analysis_page():
                     embeddings=embeddings
                 )
             
-            # Analyze ROI by cluster
+            # Analyze target by cluster
+            tgt = _get_target_column()
             cluster_stats = embeddings_analyzer.analyze_roi_by_clusters(
                 df_sample.reset_index(drop=True),
                 cluster_labels,
-                roi_column='roi'
+                roi_column=tgt
             )
             
             # Display results
@@ -1561,7 +1899,7 @@ def show_semantic_analysis_page():
             fig_2d = plot_embeddings_2d(
                 embeddings,
                 cluster_labels,
-                df_sample.reset_index(drop=True)['roi'].values,
+                df_sample.reset_index(drop=True)[tgt].values,
                 df_sample.reset_index(drop=True)
             )
             st.plotly_chart(fig_2d, width="stretch")
@@ -1581,7 +1919,7 @@ def show_semantic_analysis_page():
             
             with st.spinner("Computing dimension correlations..."):
                 dim_corr = embeddings_analyzer.correlate_embeddings_with_roi(
-                    df_sample.reset_index(drop=True)['roi'],
+                    df_sample.reset_index(drop=True)[tgt],
                     embeddings=embeddings,
                     method='spearman',
                     top_dims=20
@@ -1651,28 +1989,38 @@ def show_semantic_analysis_page():
             st.write(f"- Median words: {word_counts.median():.0f}")
         
         with col2:
-            st.markdown("**ROI Distribution**")
+            st.markdown(f"**{_get_target_label()} Distribution**")
+            tgt = _get_target_column()
             fig_roi_dist = px.histogram(
                 df_docs,
-                x='roi',
+                x=tgt,
                 nbins=50,
-                title="ROI Distribution in Analyzed Movies"
+                title=f"{_get_target_label()} Distribution in Analyzed Movies"
             )
             st.plotly_chart(fig_roi_dist, width="stretch")
         
         # Sample documents
         with st.expander("📄 View Sample Documents"):
             st.markdown("**Highest ROI Movie**")
-            idx_max = df_docs['roi'].idxmax()
+            tgt = _get_target_column()
+            idx_max = df_docs[tgt].idxmax()
             st.write(f"Title: {df_docs.loc[idx_max, 'title']}")
-            st.write(f"ROI: {df_docs.loc[idx_max, 'roi']:.2f}")
+            val_max = df_docs.loc[idx_max, tgt]
+            if tgt == 'revenue':
+                st.write(f"{_get_target_label()}: ${val_max:,.0f}")
+            else:
+                st.write(f"{_get_target_label()}: {val_max:.2f}")
             st.write(f"Document preview: {df_docs.loc[idx_max, 'document'][:300]}...")
             
             st.markdown("---")
             st.markdown("**Lowest ROI Movie**")
-            idx_min = df_docs['roi'].idxmin()
+            idx_min = df_docs[tgt].idxmin()
             st.write(f"Title: {df_docs.loc[idx_min, 'title']}")
-            st.write(f"ROI: {df_docs.loc[idx_min, 'roi']:.2f}")
+            val_min = df_docs.loc[idx_min, tgt]
+            if tgt == 'revenue':
+                st.write(f"{_get_target_label()}: ${val_min:,.0f}")
+            else:
+                st.write(f"{_get_target_label()}: {val_min:.2f}")
             st.write(f"Document preview: {df_docs.loc[idx_min, 'document'][:300]}...")
 
 
@@ -1968,9 +2316,13 @@ def show_clustering_page():
         
         # Cluster statistics table
         st.markdown("### Cluster Details")
-        
+
         # Format cluster stats for display
         display_stats = cluster_stats.copy()
+        # Use dynamic target label (ROI or Revenue) for headings
+        tgt_col = _get_target_column()
+        tgt_label = _get_target_label()
+
         if 'top_genres' in display_stats.columns:
             display_stats = display_stats[['cluster_id', 'n_movies', 'roi_mean', 'roi_median', 
                                           'roi_std', 'budget_mean', 'revenue_mean', 
@@ -1979,19 +2331,22 @@ def show_clustering_page():
             display_stats = display_stats[['cluster_id', 'n_movies', 'roi_mean', 'roi_median', 
                                           'roi_std', 'budget_mean', 'revenue_mean', 
                                           'vote_average_mean']]
-        
+
         display_stats = display_stats.sort_values('roi_mean', ascending=False)
-        display_stats.columns = ['Cluster ID', 'Movies', 'ROI Mean', 'ROI Median', 
-                                'ROI Std', 'Budget Mean', 'Revenue Mean', 
-                                'Vote Avg', 'Top Genres'] if 'top_genres' in display_stats.columns else \
-                              ['Cluster ID', 'Movies', 'ROI Mean', 'ROI Median', 
-                               'ROI Std', 'Budget Mean', 'Revenue Mean', 'Vote Avg']
-        
+        # Prepare a display-friendly copy (human-readable column names) but keep internal names for plotting
+        display_stats_display = display_stats.copy()
+        display_cols_with_genres = ['Cluster ID', 'Movies', f'{tgt_label} Mean', f'{tgt_label} Median', 
+                                    f'{tgt_label} Std', 'Budget Mean', 'Revenue Mean', 
+                                    'Vote Avg', 'Top Genres']
+        display_cols_no_genres = ['Cluster ID', 'Movies', f'{tgt_label} Mean', f'{tgt_label} Median', 
+                                  f'{tgt_label} Std', 'Budget Mean', 'Revenue Mean', 'Vote Avg']
+        display_stats_display.columns = display_cols_with_genres if 'top_genres' in display_stats_display.columns else display_cols_no_genres
+
         st.dataframe(
-            display_stats.style.format({
-                'ROI Mean': '{:.2f}',
-                'ROI Median': '{:.2f}',
-                'ROI Std': '{:.2f}',
+            display_stats_display.style.format({
+                f'{tgt_label} Mean': '{:.2f}',
+                f'{tgt_label} Median': '{:.2f}',
+                f'{tgt_label} Std': '{:.2f}',
                 'Budget Mean': '{:,.0f}',
                 'Revenue Mean': '{:,.0f}',
                 'Vote Avg': '{:.2f}'
@@ -2007,9 +2362,9 @@ def show_clustering_page():
         # Filter out noise if requested
         display_stats = cluster_stats[cluster_stats['cluster_id'] >= 0] if not show_noise else cluster_stats
         
-        # ROI Mean by Cluster
-        st.markdown("### Average ROI by Cluster")
-        
+        # Target Mean by Cluster
+        st.markdown(f"### Average {tgt_label} by Cluster")
+
         fig_roi_mean = px.bar(
             display_stats.sort_values('roi_mean', ascending=True),
             x='roi_mean',
@@ -2017,37 +2372,38 @@ def show_clustering_page():
             orientation='h',
             color='roi_mean',
             color_continuous_scale='RdYlGn',
-            labels={'roi_mean': 'Average ROI', 'cluster_id': 'Cluster ID'},
-            title='Average ROI by Cluster'
+            labels={'roi_mean': f'Average {tgt_label}', 'cluster_id': 'Cluster ID'},
+            title=f'Average {tgt_label} by Cluster'
         )
         fig_roi_mean.add_vline(x=0, line_dash="dash", line_color="red", annotation_text="Break-even")
         fig_roi_mean.update_layout(height=600)
         st.plotly_chart(fig_roi_mean, width="stretch")
-        
-        # ROI Distribution by Cluster
-        st.markdown("### ROI Distribution by Cluster")
-        
+
+        # Target Distribution by Cluster
+        st.markdown(f"### {tgt_label} Distribution by Cluster")
+
         df_with_clusters = df_movies.copy()
         df_with_clusters['cluster'] = cluster_labels
-        
+
         if not show_noise:
             df_with_clusters = df_with_clusters[df_with_clusters['cluster'] >= 0]
-        
+
         fig_roi_dist = px.box(
             df_with_clusters,
             x='cluster',
-            y='roi',
+            y=tgt_col,
             color='cluster',
             color_discrete_sequence=px.colors.qualitative.Dark24,
-            labels={'cluster': 'Cluster ID', 'roi': 'ROI'},
-            title='ROI Distribution by Cluster'
+            labels={'cluster': 'Cluster ID', tgt_col: tgt_label},
+            title=f'{tgt_label} Distribution by Cluster'
         )
-        fig_roi_dist.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        if tgt_col == 'roi':
+            fig_roi_dist.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
         fig_roi_dist.update_layout(height=500, showlegend=False)
         st.plotly_chart(fig_roi_dist, width="stretch")
-        
-        # Cluster size vs ROI
-        st.markdown("### Cluster Size vs Average ROI")
+
+        # Cluster size vs Target mean
+        st.markdown(f"### Cluster Size vs Average {tgt_label}")
 
         fig_size_roi = px.scatter(
             display_stats,
@@ -2060,10 +2416,11 @@ def show_clustering_page():
             symbol='cluster_id',
             symbol_sequence=SYMBOL_SEQUENCE,
             hover_data=['cluster_id', 'roi_median', 'vote_average_mean'],
-            labels={'n_movies': 'Number of Movies', 'roi_mean': 'Average ROI', 'cluster_id': 'Cluster ID'},
-            title='Cluster Size vs Average ROI'
+            labels={'n_movies': 'Number of Movies', 'roi_mean': f'Average {tgt_label}', 'cluster_id': 'Cluster ID'},
+            title=f'Cluster Size vs Average {tgt_label}'
         )
-        fig_size_roi.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        if tgt_col == 'roi':
+            fig_size_roi.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
         fig_size_roi.update_layout(height=500)
         st.plotly_chart(fig_size_roi, width="stretch")
         
@@ -2110,113 +2467,90 @@ def show_clustering_page():
         else:
             vis_embeddings = reduced_embeddings
         
-        # Color by cluster or ROI
+        # Per-plot target selector for clustering visualization
+        tgt_col, tgt_label = _plot_target_selector("clustering")
+
+        # Color by cluster or selected target (Individual / Cluster Average)
+        value_individual = f"{tgt_label} Individual"
+        value_clusteravg = f"{tgt_label} Cluster Average"
         color_by = st.radio(
             "Color by:",
-            ["Cluster", "ROI Individual", "ROI Cluster Average"],
+            ["Cluster", value_individual, value_clusteravg],
             horizontal=True
         )
-        
-        # Always calculate truncation bounds based on individual ROI values
-        roi_individual = df_movies['roi'].values
-        
-        # Calculate cluster average ROI if needed (but truncation uses individual values)
-        if color_by == "ROI Cluster Average":
-            # Create a mapping from cluster_id to average ROI
-            df_with_clusters = pd.DataFrame({
-                'cluster': cluster_labels,
-                'roi': roi_individual
-            })
-            cluster_avg_roi = df_with_clusters.groupby('cluster')['roi'].mean().to_dict()
-            # Map each point to its cluster's average ROI
-            roi_values_for_color = np.array([cluster_avg_roi.get(c, 0) for c in cluster_labels])
+
+        # Individual target values from movies
+        target_individual = df_movies[tgt_col].values
+
+        # Calculate cluster-average target if needed (but truncation uses individual values)
+        if color_by == value_clusteravg:
+            df_with_clusters = pd.DataFrame({'cluster': cluster_labels, 'target': target_individual})
+            cluster_avg_target = df_with_clusters.groupby('cluster')['target'].mean().to_dict()
+            target_values_for_color = np.array([cluster_avg_target.get(c, 0) for c in cluster_labels])
         else:
-            roi_values_for_color = roi_individual
-        
-        # Truncate ROI values for color mapping when coloring by ROI
-        # IMPORTANT: Truncation bounds are always calculated from individual ROI values
-        if color_by in ["ROI Individual", "ROI Cluster Average"]:
-            # Show statistics and allow manual adjustment
+            target_values_for_color = target_individual
+
+        # Truncate values for color mapping when coloring by the selected target
+        if color_by in [value_individual, value_clusteravg]:
             with st.expander("⚙️ Color Scale Settings", expanded=False):
                 col1, col2 = st.columns(2)
-                
                 with col1:
                     st.markdown("**Automatic (Percentile-based)**")
-                    st.caption("Bounds calculated from individual ROI values")
+                    st.caption("Bounds calculated from individual values")
                     percentile_method = st.selectbox(
                         "Percentile range",
                         ["1st-99th (most inclusive)", "5th-95th (recommended)", "10th-90th (more restrictive)"],
                         index=1
                     )
-                    
                     if percentile_method == "1st-99th (most inclusive)":
                         lower_percentile, upper_percentile = 1, 99
                     elif percentile_method == "5th-95th (recommended)":
                         lower_percentile, upper_percentile = 5, 95
                     else:
                         lower_percentile, upper_percentile = 10, 90
-                    
-                    # Calculate bounds from INDIVIDUAL ROI values
-                    lower_bound = np.percentile(roi_individual, lower_percentile)
-                    upper_bound = np.percentile(roi_individual, upper_percentile)
-                
+                    lower_bound = np.percentile(target_individual, lower_percentile)
+                    upper_bound = np.percentile(target_individual, upper_percentile)
                 with col2:
                     st.markdown("**Manual Override**")
                     use_manual = st.checkbox("Use manual limits", value=False)
                     if use_manual:
-                        min_roi = float(roi_individual.min())
-                        max_roi = float(roi_individual.max())
-                        
-                        lower_bound = st.number_input(
-                            "Lower bound",
-                            min_value=min_roi,
-                            max_value=max_roi,
-                            value=float(lower_bound),
-                            step=0.1
-                        )
-                        upper_bound = st.number_input(
-                            "Upper bound",
-                            min_value=min_roi,
-                            max_value=max_roi,
-                            value=float(upper_bound),
-                            step=0.1
-                        )
-                
-                # Show statistics for both individual and cluster average (if applicable)
-                st.markdown("**ROI Statistics (Individual Values):**")
+                        min_val = float(target_individual.min())
+                        max_val = float(target_individual.max())
+                        lower_bound = st.number_input("Lower bound", min_value=min_val, max_value=max_val, value=float(lower_bound), step=0.1)
+                        upper_bound = st.number_input("Upper bound", min_value=min_val, max_value=max_val, value=float(upper_bound), step=0.1)
+
+                st.markdown(f"**{tgt_label} Statistics (Individual Values):**")
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Min", f"{roi_individual.min():.2f}")
+                    st.metric("Min", f"{target_individual.min():.2f}")
                 with col2:
-                    st.metric("Max", f"{roi_individual.max():.2f}")
+                    st.metric("Max", f"{target_individual.max():.2f}")
                 with col3:
-                    st.metric("Median", f"{np.median(roi_individual):.2f}")
+                    st.metric("Median", f"{np.median(target_individual):.2f}")
                 with col4:
-                    st.metric("Mean", f"{roi_individual.mean():.2f}")
-                
-                if color_by == "ROI Cluster Average":
-                    st.markdown("**ROI Statistics (Cluster Averages):**")
+                    st.metric("Mean", f"{target_individual.mean():.2f}")
+
+                if color_by == value_clusteravg:
+                    st.markdown(f"**{tgt_label} Statistics (Cluster Averages):**")
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Min", f"{roi_values_for_color.min():.2f}")
+                        st.metric("Min", f"{target_values_for_color.min():.2f}")
                     with col2:
-                        st.metric("Max", f"{roi_values_for_color.max():.2f}")
+                        st.metric("Max", f"{target_values_for_color.max():.2f}")
                     with col3:
-                        st.metric("Median", f"{np.median(roi_values_for_color):.2f}")
+                        st.metric("Median", f"{np.median(target_values_for_color):.2f}")
                     with col4:
-                        st.metric("Mean", f"{roi_values_for_color.mean():.2f}")
-                
-                st.write(f"**Color scale range:** [{lower_bound:.2f}, {upper_bound:.2f}] (based on individual ROI)")
-            
-            # Truncate values for color mapping using bounds calculated from individual ROI
-            roi_for_color = np.clip(roi_values_for_color, lower_bound, upper_bound)
-            n_outliers = np.sum((roi_values_for_color < lower_bound) | (roi_values_for_color > upper_bound))
-            
+                        st.metric("Mean", f"{target_values_for_color.mean():.2f}")
+
+                st.write(f"**Color scale range:** [{lower_bound:.2f}, {upper_bound:.2f}] (based on individual values)")
+
+            target_for_color = np.clip(target_values_for_color, lower_bound, upper_bound)
+            n_outliers = np.sum((target_values_for_color < lower_bound) | (target_values_for_color > upper_bound))
             if n_outliers > 0:
-                color_type = "cluster average ROI" if color_by == "ROI Cluster Average" else "ROI"
-                st.info(f"📊 Truncated {n_outliers} {color_type} values for color scale (bounds: [{lower_bound:.2f}, {upper_bound:.2f}], calculated from individual ROI)")
+                color_type = f"cluster average {tgt_label}" if color_by == value_clusteravg else tgt_label
+                st.info(f"📊 Truncated {n_outliers} {color_type} values for color scale (bounds: [{lower_bound:.2f}, {upper_bound:.2f}], calculated from individual values)")
         else:
-            roi_for_color = roi_values_for_color
+            target_for_color = target_values_for_color
         
         # Create visualization dataframe
         if actual_n_components == 3:
@@ -2226,17 +2560,17 @@ def show_clustering_page():
                 'y': vis_embeddings[:, 1],
                 'z': vis_embeddings[:, 2],
                 'cluster': cluster_labels,
-                'roi': roi_for_color if color_by in ["ROI Individual", "ROI Cluster Average"] else df_movies['roi'].values,
-                'roi_original': df_movies['roi'].values,  # Keep original for hover
-                'roi_cluster_avg': roi_for_color if color_by == "ROI Cluster Average" else None,
+                'target': target_for_color if color_by in [value_individual, value_clusteravg] else df_movies[tgt_col].values,
+                'target_original': df_movies[tgt_col].values,  # Keep original for hover
+                'target_cluster_avg': target_for_color if color_by == value_clusteravg else None,
                 'title': df_movies['title'].values,
                 'vote_average': df_movies['vote_average'].values
             })
-            
+
             # Filter noise if requested
             if not show_noise:
                 df_viz = df_viz[df_viz['cluster'] >= 0]
-            
+
             if color_by == "Cluster":
                 # Build HSV palette for cluster colors and a mapping
                 cluster_ids = sorted(df_viz['cluster'].unique())
@@ -2260,30 +2594,30 @@ def show_clustering_page():
                     symbol='cluster_label',
                     symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
-                    hover_data=['title', 'roi_original', 'vote_average'],
+                    hover_data=['title', 'target_original', 'vote_average'],
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'z': 'UMAP Dimension 3', 'cluster_label': 'Cluster'},
                     title='Movie Clusters in 3D Space (colored by cluster)',
                     category_orders={'cluster_label': cluster_label_order}
                 )
             else:
-                title_suffix = "by cluster average ROI" if color_by == "ROI Cluster Average" else "by ROI"
-                hover_data = ['title', 'cluster', 'vote_average', 'roi_original']
-                if color_by == "ROI Cluster Average":
-                    hover_data.append('roi_cluster_avg')
-                
+                title_suffix = f"by cluster average {tgt_label}" if color_by == value_clusteravg else f"by {tgt_label}"
+                hover_data = ['title', 'cluster', 'vote_average', 'target_original']
+                if color_by == value_clusteravg:
+                    hover_data.append('target_cluster_avg')
+
                 fig = px.scatter_3d(
                     df_viz,
                     x='x',
                     y='y',
                     z='z',
-                    color='roi',
+                    color='target',
                     symbol='cluster',
                     symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=hover_data,
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'z': 'UMAP Dimension 3', 
-                           'roi': 'ROI (truncated)', 'roi_original': 'ROI Individual', 
-                           'roi_cluster_avg': 'ROI Cluster Avg'},
+                           'target': f'{tgt_label} (truncated)', 'target_original': f'{tgt_label} Individual', 
+                           'target_cluster_avg': f'{tgt_label} Cluster Avg'},
                     title=f'Movie Clusters in 3D Space (colored {title_suffix})',
                     color_continuous_scale='RdYlGn'
                 )
@@ -2293,17 +2627,17 @@ def show_clustering_page():
                 'x': vis_embeddings[:, 0],
                 'y': vis_embeddings[:, 1],
                 'cluster': cluster_labels,
-                'roi': roi_for_color if color_by in ["ROI Individual", "ROI Cluster Average"] else df_movies['roi'].values,
-                'roi_original': df_movies['roi'].values,  # Keep original for hover
-                'roi_cluster_avg': roi_for_color if color_by == "ROI Cluster Average" else None,
+                'target': target_for_color if color_by in [value_individual, value_clusteravg] else df_movies[tgt_col].values,
+                'target_original': df_movies[tgt_col].values,  # Keep original for hover
+                'target_cluster_avg': target_for_color if color_by == value_clusteravg else None,
                 'title': df_movies['title'].values,
                 'vote_average': df_movies['vote_average'].values
             })
-            
+
             # Filter noise if requested
             if not show_noise:
                 df_viz = df_viz[df_viz['cluster'] >= 0]
-            
+
             if color_by == "Cluster":
                 # Build HSV palette for cluster colors and a mapping
                 cluster_ids = sorted(df_viz['cluster'].unique())
@@ -2326,29 +2660,29 @@ def show_clustering_page():
                     symbol='cluster_label',
                     symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
-                    hover_data=['title', 'roi_original', 'vote_average'],
+                    hover_data=['title', 'target_original', 'vote_average'],
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'cluster_label': 'Cluster'},
                     title='Movie Clusters in 2D Space (colored by cluster)',
                     category_orders={'cluster_label': cluster_label_order}
                 )
             else:
-                title_suffix = "by cluster average ROI" if color_by == "ROI Cluster Average" else "by ROI"
-                hover_data = ['title', 'cluster', 'vote_average', 'roi_original']
-                if color_by == "ROI Cluster Average":
-                    hover_data.append('roi_cluster_avg')
-                
+                title_suffix = f"by cluster average {tgt_label}" if color_by == value_clusteravg else f"by {tgt_label}"
+                hover_data = ['title', 'cluster', 'vote_average', 'target_original']
+                if color_by == value_clusteravg:
+                    hover_data.append('target_cluster_avg')
+
                 fig = px.scatter(
                     df_viz,
                     x='x',
                     y='y',
-                    color='roi',
+                    color='target',
                     symbol='cluster',
                     symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=hover_data,
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 
-                           'roi': 'ROI (truncated)', 'roi_original': 'ROI Individual',
-                           'roi_cluster_avg': 'ROI Cluster Avg'},
+                           'target': f'{tgt_label} (truncated)', 'target_original': f'{tgt_label} Individual',
+                           'target_cluster_avg': f'{tgt_label} Cluster Avg'},
                     title=f'Movie Clusters in 2D Space (colored {title_suffix})',
                     color_continuous_scale='RdYlGn'
                 )
