@@ -960,10 +960,43 @@ def show_model_training_page(df_clean):
                     
                     st.info(f"🔍 Training with {len(valid_selected_features)} selected features (out of {len(feature_names)} total)")
                     
-                    # Subset the data to selected features
-                    X_train = X_train[valid_selected_features]
-                    X_test = X_test[valid_selected_features]
+                    # Get the unscaled data before subsetting
+                    # We need to refit the scaler on only the selected features
+                    df_features = st.session_state.feature_engineer.create_features(df_clean)
+                    
+                    # Get unscaled data for the selected features
+                    X_unscaled = df_features[valid_selected_features].fillna(0).replace([np.inf, -np.inf], 0)
+                    y_full = df_features[st.session_state.feature_engineer.target_column]
+                    
+                    # Remove rows with missing target
+                    valid_indices = ~y_full.isna()
+                    X_unscaled = X_unscaled[valid_indices]
+                    y_full = y_full[valid_indices]
+                    
+                    # Split data with selected features only
+                    from sklearn.model_selection import train_test_split
+                    X_train_unscaled, X_test_unscaled, y_train, y_test = train_test_split(
+                        X_unscaled, y_full, test_size=test_size, random_state=random_state
+                    )
+                    
+                    # Refit the scaler on selected features only
+                    from sklearn.preprocessing import StandardScaler
+                    st.session_state.feature_engineer.scaler = StandardScaler()
+                    X_train = pd.DataFrame(
+                        st.session_state.feature_engineer.scaler.fit_transform(X_train_unscaled),
+                        columns=valid_selected_features,
+                        index=X_train_unscaled.index
+                    )
+                    X_test = pd.DataFrame(
+                        st.session_state.feature_engineer.scaler.transform(X_test_unscaled),
+                        columns=valid_selected_features,
+                        index=X_test_unscaled.index
+                    )
+                    
                     feature_names = valid_selected_features
+                    
+                    # Update feature_columns to reflect the selected features
+                    st.session_state.feature_engineer.feature_columns = valid_selected_features
                 else:
                     st.info(f"🔍 Training with all {len(feature_names)} features")
                 
@@ -1108,11 +1141,6 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
     tgt_col = _get_target_column()
     tgt_label = _get_target_label()
 
-    # Temporary debug output
-    st.write("DEBUG: Trained target column:", tgt_col)
-    st.write("DEBUG: Model target_transform:", getattr(st.session_state.model_trainer, 'target_transform', 'N/A'))
-    st.write("DEBUG: Model transform_params:", getattr(st.session_state.model_trainer, 'transform_params', {}))
-
     st.markdown(f"""
     This page shows how predicted {tgt_label} changes when varying individual features while keeping others constant.
     This helps understand which factors have the most impact on {tgt_label} predictions.
@@ -1203,61 +1231,62 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
 
     # Convert predictions to chosen plot target taking into account how the model was trained
     trained_target = tgt_col  # 'roi' or 'revenue' as used when training
+    
+    # Debug: show what's happening
+    st.write(f"**Debug:** Model trained on: `{trained_target}`, Plotting: `{plot_col}`, Sample raw prediction: `{roi_predictions[0] if roi_predictions else 'N/A'}`")
+    
     # raw predictions are in trained_target units
     if trained_target == plot_col:
         # no conversion needed
         pred_vals = [np.nan if p is None else p for p in roi_predictions]
     elif trained_target == 'roi' and plot_col == 'revenue':
-        # convert ROI -> revenue per budget point: revenue = ROI * (budget + 1) + budget
-        pred_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p, b in zip(roi_predictions, budgets)]
+        # convert ROI -> revenue per budget point: revenue = budget * (ROI + 1)
+        pred_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p + 1) * b for p, b in zip(roi_predictions, budgets)]
     elif trained_target == 'revenue' and plot_col == 'roi':
-        # convert revenue -> ROI per budget point: ROI = (revenue - budget) / (budget + 1)
-        pred_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p, b in zip(roi_predictions, budgets)]
+        # convert revenue -> ROI per budget point: ROI = (revenue - budget) / budget
+        pred_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p - b) / b if b != 0 else np.nan for p, b in zip(roi_predictions, budgets)]
     else:
         pred_vals = [np.nan if p is None else p for p in roi_predictions]
+    
+    st.write(f"**Debug:** Sample converted value: `{pred_vals[0] if pred_vals else 'N/A'}`")
 
-    # Temporary debug output for budget analysis
-    if len(roi_predictions) > 0:
-        st.write("DEBUG Budget: Sample raw prediction:", roi_predictions[0])
-        st.write("DEBUG Budget: Sample converted prediction:", pred_vals[0] if len(pred_vals) > 0 else "N/A")
+    # Plot
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=budgets, y=pred_vals, mode='lines+markers', name=f'Predicted {plot_label}'))
+    if plot_col == 'roi':
+        fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+    fig.update_layout(
+        title=f"{plot_label} vs Budget",
+        xaxis_title="Budget (USD)",
+        yaxis_title=f"Predicted {plot_label}",
+        height=500
+    )
+    st.plotly_chart(fig, width="stretch")
 
-        # Plot
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=budgets, y=pred_vals, mode='lines+markers', name=f'Predicted {plot_label}'))
-        if plot_col == 'roi':
-            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
-        fig.update_layout(
-            title=f"{plot_label} vs Budget",
-            xaxis_title="Budget (USD)",
-            yaxis_title=f"Predicted {plot_label}",
-            height=500
-        )
-        st.plotly_chart(fig, width="stretch")
-
-        # Summary statistics (ignore failed predictions)
-        valid_preds = [p for p in pred_vals if p is not None and not (isinstance(p, float) and np.isnan(p))]
-        col1, col2, col3 = st.columns(3)
-        if valid_preds:
-            with col1:
-                if plot_col == 'revenue':
-                    st.metric(f"Min {plot_label}", f"${min(valid_preds):,.0f}")
-                else:
-                    st.metric(f"Min {plot_label}", f"{min(valid_preds):.2f}")
-            with col2:
-                if plot_col == 'revenue':
-                    st.metric(f"Max {plot_label}", f"${max(valid_preds):,.0f}")
-                else:
-                    st.metric(f"Max {plot_label}", f"{max(valid_preds):.2f}")
-            with col3:
-                if plot_col == 'revenue':
-                    st.metric(f"{plot_label} Range", f"${max(valid_preds) - min(valid_preds):,.0f}")
-                else:
-                    st.metric(f"{plot_label} Range", f"{max(valid_preds) - min(valid_preds):.2f}")
-        else:
-            with col1:
-                st.metric(f"Min {tgt_label}", "N/A")
-            with col2:
-                st.metric(f"Max {tgt_label}", "N/A")
+    # Summary statistics (ignore failed predictions)
+    valid_preds = [p for p in pred_vals if p is not None and not (isinstance(p, float) and np.isnan(p))]
+    col1, col2, col3 = st.columns(3)
+    if valid_preds:
+        with col1:
+            if plot_col == 'revenue':
+                st.metric(f"Min {plot_label}", f"${min(valid_preds):,.0f}")
+            else:
+                st.metric(f"Min {plot_label}", f"{min(valid_preds):.2f}")
+        with col2:
+            if plot_col == 'revenue':
+                st.metric(f"Max {plot_label}", f"${max(valid_preds):,.0f}")
+            else:
+                st.metric(f"Max {plot_label}", f"{max(valid_preds):.2f}")
+        with col3:
+            if plot_col == 'revenue':
+                st.metric(f"{plot_label} Range", f"${max(valid_preds) - min(valid_preds):,.0f}")
+            else:
+                st.metric(f"{plot_label} Range", f"{max(valid_preds) - min(valid_preds):.2f}")
+    else:
+        with col1:
+            st.metric(f"Min {tgt_label}", "N/A")
+        with col2:
+            st.metric(f"Max {tgt_label}", "N/A")
             with col3:
                 st.metric(f"{tgt_label} Range", "N/A")
     
@@ -1307,10 +1336,10 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
             plot_vals = [np.nan if p is None else p for p in roi_preds]
         elif trained_target == 'roi' and plot_col == 'revenue':
             b = baseline_budget
-            plot_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p in roi_preds]
+            plot_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else p * (b + 1) for p in roi_preds]
         elif trained_target == 'revenue' and plot_col == 'roi':
             b = baseline_budget
-            plot_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p in roi_preds]
+            plot_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p - b) / b if b != 0 else np.nan for p in roi_preds]
         else:
             plot_vals = [np.nan if p is None else p for p in roi_preds]
 
@@ -1399,10 +1428,10 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
             y_vals = [np.nan if p is None else p for p in pred_vals]
         elif trained_target == 'roi' and plot_col == 'revenue':
             b = baseline_budget
-            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p in pred_vals]
+            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else p * (b + 1) for p in pred_vals]
         elif trained_target == 'revenue' and plot_col == 'roi':
             b = baseline_budget
-            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p in pred_vals]
+            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p - b) / b if b != 0 else np.nan for p in pred_vals]
         else:
             y_vals = [np.nan if p is None else p for p in pred_vals]
 
@@ -1474,10 +1503,10 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
             y_vals = [np.nan if p is None else p for p in pred_vals]
         elif trained_target == 'roi' and plot_col == 'revenue':
             b = baseline_budget
-            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p in pred_vals]
+            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1)) for p in pred_vals]
         elif trained_target == 'revenue' and plot_col == 'roi':
             b = baseline_budget
-            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p in pred_vals]
+            y_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / b if (b is not None and b != 0) else np.nan) for p in pred_vals]
         else:
             y_vals = [np.nan if p is None else p for p in pred_vals]
 
@@ -1546,10 +1575,10 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
             genre_vals = [np.nan if p is None else p for p in pred_vals]
         elif trained_target == 'roi' and plot_col == 'revenue':
             b = baseline_budget
-            genre_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1) + b) for p in pred_vals]
+            genre_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p * (b + 1)) for p in pred_vals]
         elif trained_target == 'revenue' and plot_col == 'roi':
             b = baseline_budget
-            genre_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / (b + 1) if (b is not None) else np.nan) for p in pred_vals]
+            genre_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else ((p - b) / b if (b is not None and b != 0) else np.nan) for p in pred_vals]
         else:
             genre_vals = [np.nan if p is None else p for p in pred_vals]
 
@@ -2323,34 +2352,100 @@ def show_clustering_page():
         tgt_col = _get_target_column()
         tgt_label = _get_target_label()
 
-        if 'top_genres' in display_stats.columns:
-            display_stats = display_stats[['cluster_id', 'n_movies', 'roi_mean', 'roi_median', 
-                                          'roi_std', 'budget_mean', 'revenue_mean', 
-                                          'vote_average_mean', 'top_genres']]
-        else:
-            display_stats = display_stats[['cluster_id', 'n_movies', 'roi_mean', 'roi_median', 
-                                          'roi_std', 'budget_mean', 'revenue_mean', 
-                                          'vote_average_mean']]
+        has_genres = 'top_genres' in display_stats.columns
 
-        display_stats = display_stats.sort_values('roi_mean', ascending=False)
-        # Prepare a display-friendly copy (human-readable column names) but keep internal names for plotting
+        # Always include both ROI and Revenue summary stats so users can compare
+        # Build a canonical set of source columns (keep only those present in dataframe)
+        canonical_src = [
+            'cluster_id', 'n_movies',
+            'roi_mean', 'roi_median', 'roi_std',
+            'revenue_mean', 'revenue_median', 'revenue_std',
+            'budget_mean', 'vote_average_mean'
+        ]
+
+        src_cols = [c for c in canonical_src if c in display_stats.columns]
+
+        # Define display names in a sensible order depending on selected target
+        if tgt_col == 'revenue':
+            # Prioritize revenue columns first, then ROI
+            display_names_order = [
+                'Cluster ID', 'Movies',
+                'Revenue Mean', 'Revenue Median', 'Revenue Std',
+                'ROI Mean', 'ROI Median', 'ROI Std',
+                'Budget Mean', 'Vote Avg'
+            ]
+        else:
+            # Prioritize ROI columns first, then revenue
+            display_names_order = [
+                'Cluster ID', 'Movies',
+                'ROI Mean', 'ROI Median', 'ROI Std',
+                'Revenue Mean', 'Revenue Median', 'Revenue Std',
+                'Budget Mean', 'Vote Avg'
+            ]
+
+        # Filter display_names_order to only include names that map to available src_cols
+        # Build mapping from src_col -> display name
+        src_to_name = {
+            'cluster_id': 'Cluster ID',
+            'n_movies': 'Movies',
+            'roi_mean': 'ROI Mean',
+            'roi_median': 'ROI Median',
+            'roi_std': 'ROI Std',
+            'revenue_mean': 'Revenue Mean',
+            'revenue_median': 'Revenue Median',
+            'revenue_std': 'Revenue Std',
+            'budget_mean': 'Budget Mean',
+            'vote_average_mean': 'Vote Avg'
+        }
+
+        # Build the final ordered list of source columns that exist
+        final_src_cols = []
+        for disp in display_names_order:
+            # find the source column that maps to this display name
+            for k, v in src_to_name.items():
+                if v == disp and k in src_cols:
+                    final_src_cols.append(k)
+                    break
+
+        # Append genres column if present
+        if has_genres:
+            final_src_cols.append('top_genres')
+            display_names = [src_to_name.get(c, c) for c in final_src_cols[:-1]] + ['Top Genres']
+        else:
+            display_names = [src_to_name.get(c, c) for c in final_src_cols]
+
+        # Subset and sort using the primary numeric column (first metric after Cluster ID/Movies)
+        sort_key = final_src_cols[2] if len(final_src_cols) > 2 else final_src_cols[0]
+        display_stats = display_stats.loc[:, [c for c in final_src_cols if c in display_stats.columns]]
+        display_stats = display_stats.sort_values(sort_key, ascending=False)
+
         display_stats_display = display_stats.copy()
-        display_cols_with_genres = ['Cluster ID', 'Movies', f'{tgt_label} Mean', f'{tgt_label} Median', 
-                                    f'{tgt_label} Std', 'Budget Mean', 'Revenue Mean', 
-                                    'Vote Avg', 'Top Genres']
-        display_cols_no_genres = ['Cluster ID', 'Movies', f'{tgt_label} Mean', f'{tgt_label} Median', 
-                                  f'{tgt_label} Std', 'Budget Mean', 'Revenue Mean', 'Vote Avg']
-        display_stats_display.columns = display_cols_with_genres if 'top_genres' in display_stats_display.columns else display_cols_no_genres
+        # Rename columns to human-friendly labels when lengths match
+        if len(display_names) == display_stats_display.shape[1]:
+            display_stats_display.columns = display_names
+
+        # Build a formatting map for whichever display columns are present
+        format_map = {}
+        col_names = list(display_stats_display.columns)
+        if 'ROI Mean' in col_names:
+            format_map['ROI Mean'] = '{:.2f}'
+        if 'ROI Median' in col_names:
+            format_map['ROI Median'] = '{:.2f}'
+        if 'ROI Std' in col_names:
+            format_map['ROI Std'] = '{:.2f}'
+        if 'Revenue Mean' in col_names:
+            format_map['Revenue Mean'] = '{:,.0f}'
+        if 'Revenue Median' in col_names:
+            format_map['Revenue Median'] = '{:,.0f}'
+        if 'Revenue Std' in col_names:
+            format_map['Revenue Std'] = '{:,.0f}'
+        if 'Budget Mean' in col_names:
+            format_map['Budget Mean'] = '{:,.0f}'
+        if 'Vote Avg' in col_names:
+            format_map['Vote Avg'] = '{:.2f}'
 
         st.dataframe(
-            display_stats_display.style.format({
-                f'{tgt_label} Mean': '{:.2f}',
-                f'{tgt_label} Median': '{:.2f}',
-                f'{tgt_label} Std': '{:.2f}',
-                'Budget Mean': '{:,.0f}',
-                'Revenue Mean': '{:,.0f}',
-                'Vote Avg': '{:.2f}'
-            }),
+            display_stats_display.style.format(format_map),
             width="stretch",
             height=400
         )

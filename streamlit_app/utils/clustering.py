@@ -249,11 +249,13 @@ def analyze_clusters(df: pd.DataFrame, cluster_labels: np.ndarray) -> pd.DataFra
             'n_movies': len(cluster_movies),
             'roi_mean': cluster_movies['roi'].mean(),
             'roi_median': cluster_movies['roi'].median(),
-            'roi_std': cluster_movies['roi'].std(),
+                'roi_std': cluster_movies['roi'].std(),
             'roi_min': cluster_movies['roi'].min(),
             'roi_max': cluster_movies['roi'].max(),
             'budget_mean': cluster_movies['budget'].mean(),
-            'revenue_mean': cluster_movies['revenue'].mean(),
+                'revenue_mean': cluster_movies['revenue'].mean(),
+                'revenue_median': cluster_movies['revenue'].median(),
+                'revenue_std': cluster_movies['revenue'].std(),
             'vote_average_mean': cluster_movies['vote_average'].mean(),
         }
         
@@ -278,6 +280,8 @@ def analyze_clusters(df: pd.DataFrame, cluster_labels: np.ndarray) -> pd.DataFra
             'roi_max': noise_movies['roi'].max(),
             'budget_mean': noise_movies['budget'].mean(),
             'revenue_mean': noise_movies['revenue'].mean(),
+            'revenue_median': noise_movies['revenue'].median(),
+            'revenue_std': noise_movies['revenue'].std(),
             'vote_average_mean': noise_movies['vote_average'].mean(),
             'top_genres': 'Noise'
         }

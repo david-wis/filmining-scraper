@@ -232,6 +232,7 @@ class FeatureEngineer:
                 if feature not in df_pred.columns:
                     df_pred[feature] = 0
             
+            # IMPORTANT: Only select the features that were used during training
             X_pred = df_pred[self.feature_columns].fillna(0)
         else:
             # Fallback to default features if not trained yet
@@ -239,13 +240,15 @@ class FeatureEngineer:
                 'release_year', 'budget_log', 'vote_confidence', 'rating_popularity_score',
                 'status_released', 'is_adult'
             ]
+            # Only use features that exist
+            default_features = [f for f in default_features if f in df_pred.columns]
             X_pred = df_pred[default_features].fillna(0)
         
         # Replace infinite values with 0
         X_pred = X_pred.replace([np.inf, -np.inf], 0)
         X_pred = X_pred.fillna(0)
         
-        # Scale features
+        # Scale features using the same scaler from training
         X_pred_scaled = self.scaler.transform(X_pred)
         X_pred_scaled = pd.DataFrame(X_pred_scaled, columns=X_pred.columns)
         

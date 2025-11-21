@@ -324,6 +324,10 @@ class ROIModelTrainer:
         # include transform metadata
         model_data['target_transform'] = getattr(self, 'target_transform', 'raw')
         model_data['transform_params'] = getattr(self, 'transform_params', {})
+        # include target column from feature engineer
+        model_data['target_column'] = getattr(st.session_state.feature_engineer, 'target_column', 'roi')
+        # include feature engineer state
+        model_data['feature_engineer_state'] = st.session_state.feature_engineer.__dict__
         
         joblib.dump(model_data, filepath)
         st.success(f"✅ Model saved to {filepath}")
@@ -345,6 +349,13 @@ class ROIModelTrainer:
             self.transform_params = model_data.get('transform_params', {})
             self.is_trained = True
             st.success(f"✅ Model loaded from {filepath}")
+            # restore feature_engineer state
+            if 'feature_engineer_state' in model_data:
+                st.session_state.feature_engineer.__dict__.update(model_data['feature_engineer_state'])
+            elif 'feature_columns' in model_data:
+                st.session_state.feature_engineer.feature_columns = model_data['feature_columns']
+            if 'target_column' in model_data:
+                st.session_state.feature_engineer.target_column = model_data['target_column']
         except Exception as e:
             st.error(f"❌ Error loading model: {str(e)}")
     
