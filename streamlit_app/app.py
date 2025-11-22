@@ -77,7 +77,7 @@ def main():
     ]
     # Profitability sections
     profitability_sections = [
-        "🏠 Profitability Overview", "🔮 Predict Profitability", "🤖 Train Classifier", "📈 Model Performance", "🔬 Sensitivity Analysis"
+        "🏠 Profitability Overview", "🔮 Predict Profitability", "🤖 Train Classifier", "📈 Model Performance", "🔬 Sensitivity Analysis", "🎯 Thematic Clustering"
     ]
 
     if top_section == "Revenue":
@@ -125,6 +125,8 @@ def main():
             show_profitability_performance()
         elif page == "🔬 Sensitivity Analysis":
             show_profitability_sensitivity_page(df_clean, df_genres)
+        elif page == "🎯 Thematic Clustering":
+            show_profitability_clustering_page()
     else:
         # revenue pages (legacy)
         if page == "🏠 Home":
@@ -2899,6 +2901,28 @@ def show_clustering_page():
             legend=dict(orientation='h')
         )
         return fig
+
+    def _make_continuous_colorbar_fig(min_val, max_val, colorscale='Viridis'):
+        """Return a small figure that displays a continuous colorbar for a numeric range.
+
+        Used to show cluster-mean profitability color scale next to the shape legend.
+        """
+        import plotly.graph_objects as go
+        # simple 1x2 heatmap to produce a colorbar
+        z = [[min_val, max_val]]
+        fig = go.Figure(data=go.Heatmap(
+            z=z,
+            colorscale=colorscale,
+            showscale=True,
+            colorbar=dict(len=0.9, thickness=14, outlinewidth=0)
+        ))
+        fig.update_layout(
+            height=80,
+            margin=dict(l=0, r=0, t=0, b=0),
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False)
+        )
+        return fig
     
     # Create tabs for different visualizations
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -3133,9 +3157,16 @@ def show_clustering_page():
         st.subheader("🗺️ Cluster Visualization")
         
         # Get the actual number of components used from session state
-        umap_n_components = st.session_state.get('umap_n_components', 2)
-        use_umap_reduction = st.session_state.get('use_umap_reduction', True)
-        actual_n_components = umap_n_components if use_umap_reduction else 2
+        # prefer persisted values from clustering step; fall back to current UI selections
+        persisted_n_comp = st.session_state.get('prof_umap_n_components', None)
+        persisted_use_umap = st.session_state.get('prof_use_umap_reduction', None)
+        umap_n_components = persisted_n_comp if persisted_n_comp is not None else st.session_state.get('umap_n_components', 2)
+        use_umap_reduction = persisted_use_umap if persisted_use_umap is not None else st.session_state.get('use_umap_reduction', True)
+        # If reduced embeddings exist, derive actual components from their shape to avoid mismatch
+        if reduced_embeddings is not None:
+            actual_n_components = int(reduced_embeddings.shape[1])
+        else:
+            actual_n_components = umap_n_components if use_umap_reduction else 2
         
         if reduced_embeddings is None:
             st.warning("⚠️ UMAP reduction was not used. Using original embeddings for visualization.")
@@ -3454,6 +3485,623 @@ def show_clustering_page():
                         st.markdown("---")
         else:
             st.info("👆 Click 'Update Representatives' to see representative movies for each cluster.")
+
+
+def show_profitability_clustering_page():
+    """Thematic clustering focused on profitability.
+
+    This mirrors the main thematic clustering page but computes and displays
+    profitability rates (based on ROI threshold) per cluster instead of focusing
+    on raw ROI statistics.
+    """
+    from utils.clustering import (
+        get_database_connection, load_embeddings_and_movie_data,
+        perform_umap_reduction, perform_hdbscan_clustering,
+        analyze_clusters, get_cluster_representative_movies
+    )
+
+    st.header("🎯 Thematic Clustering (Profitability)")
+
+    st.markdown("""
+    This page clusters movies by their overview embeddings (UMAP + HDBSCAN) and
+    reports cluster-level profitability rates (fraction of movies exceeding the
+    configured profitability threshold).
+    """)
+
+    # Dependency check
+    try:
+        import umap
+        import hdbscan
+    except ImportError as e:
+        st.error(f"❌ Missing dependency: {str(e)}")
+        st.info("Please install required packages: `pip install umap-learn hdbscan`")
+        return
+
+    # Database connection
+    engine = get_database_connection()
+    if engine is None:
+        st.error("❌ Cannot connect to database.")
+        return
+
+    # Load data options
+    st.subheader("📥 Load Data")
+    col1, col2 = st.columns(2)
+    with col1:
+        sample_size = st.number_input("Number of movies to analyze", min_value=100, max_value=10000, value=3000, step=100)
+    with col2:
+        random_seed = st.number_input("Random seed", min_value=0, max_value=1000, value=42)
+
+    if st.button("🔄 Load Embeddings (Profitability)"):
+        with st.spinner("Loading embeddings from database..."):
+            embeddings, df_movies = load_embeddings_and_movie_data(engine, sample_size=sample_size, random_seed=random_seed)
+        if embeddings is None or df_movies is None:
+            st.error("❌ Failed to load embeddings. Make sure embeddings are generated in the database.")
+            return
+        st.session_state['prof_clustering_embeddings'] = embeddings
+        st.session_state['prof_clustering_movies'] = df_movies
+        st.success(f"✅ Loaded {len(df_movies):,} movies with embeddings of dimension {embeddings.shape[1]}")
+
+    if 'prof_clustering_embeddings' not in st.session_state:
+        st.info("👆 Click the button above to load embeddings from the database.")
+        return
+
+    embeddings = st.session_state['prof_clustering_embeddings']
+    df_movies = st.session_state['prof_clustering_movies']
+
+    # Ensure ROI & profitability label exist
+    if 'roi' not in df_movies.columns:
+        if 'revenue' in df_movies.columns and 'budget' in df_movies.columns:
+            df_movies['roi'] = (df_movies['revenue'] - df_movies['budget']) / df_movies['budget']
+
+    # Use threshold from session (fallback to 0.0)
+    threshold = float(st.session_state.get('profitability_threshold', 0.0))
+    df_movies['is_profitable'] = (df_movies['roi'] > threshold).astype(int)
+
+    # Clustering configuration (minimal subset)
+    st.subheader("⚙️ Clustering Configuration")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        umap_n_neighbors = st.slider("n_neighbors", 5, 50, 30)
+        umap_min_dist = st.slider("min_dist", 0.0, 1.0, 0.1, step=0.05)
+        umap_n_components = st.selectbox("Reduction dimensions", [2, 3], index=0)
+    with col2:
+        min_cluster_size = st.slider("min_cluster_size", 5, 100, 20)
+        min_samples = st.slider("min_samples", 1, 20, 1)
+        cluster_epsilon = st.slider("cluster_selection_epsilon", 0.0, 0.5, 0.0, step=0.05)
+    with col3:
+        use_umap_reduction = st.checkbox("Use UMAP reduction before clustering", value=True)
+        show_noise = st.checkbox("Show noise points", value=True)
+
+    if st.button("🚀 Perform Clustering (Profitability)"):
+        with st.spinner("Performing UMAP reduction and HDBSCAN clustering..."):
+            try:
+                if use_umap_reduction:
+                    reduced_embeddings = perform_umap_reduction(
+                        embeddings, n_components=umap_n_components,
+                        n_neighbors=umap_n_neighbors, min_dist=umap_min_dist,
+                        random_state=random_seed
+                    )
+                    clustering_input = reduced_embeddings
+                else:
+                    clustering_input = embeddings
+                    reduced_embeddings = None
+
+                cluster_labels = perform_hdbscan_clustering(
+                    clustering_input,
+                    min_cluster_size=min_cluster_size,
+                    min_samples=min_samples,
+                    cluster_selection_epsilon=cluster_epsilon
+                )
+
+                # store
+                st.session_state['prof_cluster_labels'] = cluster_labels
+                st.session_state['prof_reduced_embeddings'] = reduced_embeddings
+                st.session_state['prof_clustering_input'] = clustering_input
+                # persist UMAP config so visualization knows how many components were produced
+                st.session_state['prof_umap_n_components'] = umap_n_components
+                st.session_state['prof_use_umap_reduction'] = use_umap_reduction
+
+                # Analyze clusters (base ROI stats)
+                cluster_stats = analyze_clusters(df_movies, cluster_labels)
+
+                # Compute profitability rate per cluster and merge
+                df_with_clusters = df_movies.copy()
+                df_with_clusters['cluster'] = cluster_labels
+                profit_rates = df_with_clusters.groupby('cluster')['is_profitable'].mean().reset_index()
+                profit_rates.columns = ['cluster_id', 'profitability_rate']
+
+                # Merge (left join) so we keep cluster_stats order and add profitability_rate
+                cluster_stats = cluster_stats.merge(profit_rates, on='cluster_id', how='left')
+                st.session_state['prof_cluster_stats'] = cluster_stats
+
+                n_clusters = len([c for c in np.unique(cluster_labels) if c >= 0])
+                n_noise = np.sum(cluster_labels == -1)
+                st.success(f"✅ Clustering completed! Found {n_clusters} clusters and {n_noise} noise points.")
+            except Exception as e:
+                st.error(f"❌ Error during clustering: {str(e)}")
+                return
+
+    if 'prof_cluster_labels' not in st.session_state:
+        st.info("👆 Configure parameters and click 'Perform Clustering (Profitability)' to start.")
+        return
+
+    cluster_labels = st.session_state['prof_cluster_labels']
+    cluster_stats = st.session_state.get('prof_cluster_stats')
+    reduced_embeddings = st.session_state.get('prof_reduced_embeddings')
+    clustering_input = st.session_state.get('prof_clustering_input', embeddings)
+
+    # Tabs: stats, profitability, viz, representatives
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Cluster Statistics",
+        "📈 Profitability by Cluster",
+        "🗺️ Visualization",
+        "🎬 Cluster Representatives"
+    ])
+
+    # Tab 1: Cluster Statistics (include profitability_rate)
+    with tab1:
+        st.subheader("📊 Cluster Statistics (Profitability)")
+        n_clusters = len([c for c in np.unique(cluster_labels) if c >= 0])
+        n_noise = np.sum(cluster_labels == -1)
+        total_movies = len(cluster_labels)
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Clusters", n_clusters)
+        with col2:
+            st.metric("Noise Points", n_noise)
+        with col3:
+            st.metric("Clustered Movies", total_movies - n_noise)
+        with col4:
+            st.metric("Clustering Rate", f"{(total_movies - n_noise) / total_movies * 100:.1f}%")
+
+        if cluster_stats is not None:
+            display_stats = cluster_stats.copy()
+            # Prefer showing profitability_rate and later ROI columns
+            cols_priority = [c for c in ['cluster_id', 'n_movies', 'profitability_rate', 'roi_mean', 'roi_median', 'budget_mean', 'vote_average_mean'] if c in display_stats.columns]
+            display_stats = display_stats.loc[:, cols_priority]
+            # format
+            fmt = {}
+            if 'profitability_rate' in display_stats.columns:
+                fmt['profitability_rate'] = '{:.3f}'
+            if 'roi_mean' in display_stats.columns:
+                fmt['roi_mean'] = '{:.2f}'
+            if 'budget_mean' in display_stats.columns:
+                fmt['budget_mean'] = '{:,.0f}'
+
+            st.dataframe(display_stats.style.format(fmt), width='stretch', height=400)
+
+    # Tab 2: Profitability by cluster
+    with tab2:
+        st.subheader("📈 Profitability by Cluster")
+        if cluster_stats is None or 'profitability_rate' not in cluster_stats.columns:
+            st.info("Run clustering to compute profitability rates.")
+        else:
+            display = cluster_stats[cluster_stats['cluster_id'] >= 0].sort_values('profitability_rate', ascending=True)
+            fig = px.bar(
+                display,
+                x='profitability_rate',
+                y='cluster_id',
+                orientation='h',
+                color='profitability_rate',
+                color_continuous_scale='Viridis',
+                labels={'profitability_rate': 'Profitability Rate', 'cluster_id': 'Cluster ID'},
+                title='Profitability Rate by Cluster'
+            )
+            st.plotly_chart(fig, width='stretch')
+
+            st.markdown("### Cluster Size vs Profitability Rate")
+            fig2 = px.scatter(
+                display,
+                x='n_movies',
+                y='profitability_rate',
+                size='n_movies',
+                color='profitability_rate',
+                color_continuous_scale='Viridis',
+                hover_data=['cluster_id'],
+                labels={'n_movies': 'Number of Movies', 'profitability_rate': 'Profitability Rate'},
+                title='Cluster Size vs Profitability Rate'
+            )
+            st.plotly_chart(fig2, width='stretch')
+
+    # Tab 3: Visualization (select coloring)
+    with tab3:
+        st.subheader("🗺️ Cluster Visualization (Profitability)")
+        umap_n_components = st.session_state.get('umap_n_components', 2)
+        use_umap_reduction = st.session_state.get('use_umap_reduction', True)
+        # Prefer the actual dimensionality of reduced embeddings (if available).
+        # Some flows persist a 3D UMAP result; use its real shape to decide 2D vs 3D plotting.
+        if reduced_embeddings is not None and hasattr(reduced_embeddings, 'shape'):
+            try:
+                actual_n_components = int(reduced_embeddings.shape[1])
+            except Exception:
+                actual_n_components = umap_n_components if use_umap_reduction else 2
+        else:
+            actual_n_components = umap_n_components if use_umap_reduction else 2
+
+        if reduced_embeddings is None:
+            st.warning("⚠️ UMAP reduction was not used. Using original embeddings for visualization.")
+            from sklearn.decomposition import PCA
+            pca = PCA(n_components=actual_n_components, random_state=42)
+            vis_embeddings = pca.fit_transform(embeddings)
+        else:
+            vis_embeddings = reduced_embeddings
+
+        # Color options: Cluster, Individual Profitability, Cluster Mean Profitability
+        color_by = st.radio(
+            "Color by:",
+            ["Cluster", "Profitability (Individual)", "Profitability (Cluster Mean)"],
+            horizontal=True
+        )
+
+        # Shape encoding: allow user to disable shape encoding and use a single symbol
+        shape_mode = st.selectbox(
+            "Shape encoding:",
+            ["Enabled (use shapes)", "Disabled (single symbol)"],
+            index=0,
+            key="prof_shapes_select",
+            help="Turn off shapes to use the same marker for all points (useful to avoid busy legends)."
+        )
+        shapes_enabled = (shape_mode == "Enabled (use shapes)")
+
+        # Build viz dataframe
+        if actual_n_components == 3:
+            df_viz = pd.DataFrame({
+                'x': vis_embeddings[:, 0], 'y': vis_embeddings[:, 1], 'z': vis_embeddings[:, 2],
+                'cluster': cluster_labels,
+                'is_profitable': df_movies['is_profitable'].values if 'is_profitable' in df_movies.columns else 0,
+                'title': df_movies['title'].values,
+                'vote_average': df_movies['vote_average'].values
+            })
+        else:
+            df_viz = pd.DataFrame({
+                'x': vis_embeddings[:, 0], 'y': vis_embeddings[:, 1],
+                'cluster': cluster_labels,
+                'is_profitable': df_movies['is_profitable'].values if 'is_profitable' in df_movies.columns else 0,
+                'title': df_movies['title'].values,
+                'vote_average': df_movies['vote_average'].values
+            })
+
+        if not show_noise:
+            df_viz = df_viz[df_viz['cluster'] >= 0]
+
+        # Helper for colors and shapes
+        SYMBOL_SEQUENCE = ['circle', 'circle-open', 'cross', 'diamond', 'diamond-open', 'square', 'square-open', 'x']
+
+        def make_hsv_palette(n, s=0.7, v=0.9):
+            import colorsys
+            if n <= 0:
+                return []
+            colors = []
+            for i in range(n):
+                h = float(i) / float(n)
+                r, g, b = colorsys.hsv_to_rgb(h, s, v)
+                colors.append('#%02x%02x%02x' % (int(r * 255), int(g * 255), int(b * 255)))
+            return colors
+
+        # Prepare color values depending on selection
+        if color_by == "Cluster":
+            # Map cluster ids to categorical string labels for Plotly
+            df_viz['cluster_label'] = df_viz['cluster'].astype(str)
+            cluster_ids = sorted(df_viz['cluster'].unique())
+            cluster_label_order = [str(cid) for cid in cluster_ids]
+            df_viz['cluster_label'] = pd.Categorical(df_viz['cluster_label'], categories=cluster_label_order, ordered=True)
+            n_cls = len(cluster_ids)
+            hsv_colors = make_hsv_palette(n_cls)
+            color_map = {str(cid): hsv_colors[i] for i, cid in enumerate(cluster_ids)}
+
+            # decide whether to encode cluster as shapes or not
+            if shapes_enabled:
+                symbol_args = {'symbol': 'cluster_label', 'symbol_sequence': SYMBOL_SEQUENCE}
+            else:
+                symbol_args = {}
+
+            if actual_n_components == 3:
+                fig = px.scatter_3d(
+                    df_viz,
+                    x='x', y='y', z='z',
+                    color='cluster_label',
+                    color_discrete_map=color_map,
+                    size='vote_average',
+                    hover_data=['title'],
+                    title='Movie Clusters in 3D Space (colored by cluster)',
+                    category_orders={'cluster_label': cluster_label_order},
+                    **symbol_args
+                )
+            else:
+                fig = px.scatter(
+                    df_viz,
+                    x='x', y='y',
+                    color='cluster_label',
+                    color_discrete_map=color_map,
+                    size='vote_average',
+                    hover_data=['title'],
+                    title='Movie Clusters in 2D Space (colored by cluster)',
+                    category_orders={'cluster_label': cluster_label_order},
+                    **symbol_args
+                )
+
+            # if shapes disabled, force a single marker symbol for all traces
+            if not shapes_enabled:
+                try:
+                    fig.update_traces(marker_symbol='circle')
+                except Exception:
+                    pass
+
+            # helper legend builders (local copies)
+            def _make_color_legend_fig(cluster_ids, color_map):
+                import plotly.graph_objects as go
+                fig = go.Figure()
+                for cid in cluster_ids:
+                    fig.add_trace(go.Scatter(
+                        x=[cid], y=[0], mode='markers',
+                        marker=dict(color=color_map.get(str(cid), '#888'), size=12),
+                        name=f"Cluster {cid}", showlegend=True
+                    ))
+                fig.update_layout(
+                    height=60, margin=dict(l=0, r=0, t=0, b=0),
+                    xaxis=dict(visible=False), yaxis=dict(visible=False),
+                    legend=dict(orientation='h')
+                )
+                return fig
+
+            def _make_shape_legend_fig(cluster_ids, symbol_seq):
+                import plotly.graph_objects as go
+                fig = go.Figure()
+                for i, cid in enumerate(cluster_ids):
+                    sym = symbol_seq[i % len(symbol_seq)]
+                    fig.add_trace(go.Scatter(
+                        x=[i], y=[0], mode='markers',
+                        marker=dict(color='#444', size=12, symbol=sym),
+                        name=f"Cluster {cid}", showlegend=True
+                    ))
+                fig.update_layout(
+                    height=60, margin=dict(l=0, r=0, t=0, b=0),
+                    xaxis=dict(visible=False), yaxis=dict(visible=False),
+                    legend=dict(orientation='h')
+                )
+                return fig
+
+            def _make_continuous_colorbar_fig(min_val, max_val, colorscale='Viridis'):
+                import plotly.graph_objects as go
+                z = [[min_val, max_val]]
+                fig = go.Figure(data=go.Heatmap(
+                    z=z,
+                    colorscale=colorscale,
+                    showscale=True,
+                    colorbar=dict(len=0.9, thickness=14, outlinewidth=0)
+                ))
+                fig.update_layout(
+                    height=80, margin=dict(l=0, r=0, t=0, b=0),
+                    xaxis=dict(visible=False), yaxis=dict(visible=False)
+                )
+                return fig
+
+            # show separate legends for colors/shapes if possible
+            try:
+                color_legend_fig = _make_color_legend_fig(cluster_ids, {str(k): v for k, v in color_map.items()})
+                shape_legend_fig = _make_shape_legend_fig(cluster_ids, SYMBOL_SEQUENCE)
+                lcol, rcol = st.columns(2)
+                with lcol:
+                    st.markdown("**Color legend**")
+                    st.plotly_chart(color_legend_fig, use_container_width=True)
+                with rcol:
+                    st.markdown("**Shape legend**")
+                    st.plotly_chart(shape_legend_fig, use_container_width=True)
+            except Exception:
+                fig.update_layout(showlegend=True)
+
+        elif color_by == "Profitability (Cluster Mean)":
+            # compute mean profitability per cluster and map to each movie
+            cluster_map = df_viz.groupby('cluster')['is_profitable'].mean().to_dict()
+            df_viz['cluster_mean_profit'] = df_viz['cluster'].map(cluster_map)
+            color_col = 'cluster_mean_profit'
+            title_suffix = 'cluster mean profitability'
+
+            # prepare categorical cluster labels for shape encoding
+            cluster_ids = sorted(df_viz['cluster'].unique())
+            cluster_label_order = [str(cid) for cid in cluster_ids]
+            df_viz['cluster_label'] = df_viz['cluster'].astype(str)
+            df_viz['cluster_label'] = pd.Categorical(df_viz['cluster_label'], categories=cluster_label_order, ordered=True)
+
+            # decide whether to encode cluster as shapes or not
+            if shapes_enabled:
+                symbol_args = {'symbol': 'cluster_label', 'symbol_sequence': SYMBOL_SEQUENCE}
+            else:
+                symbol_args = {}
+
+            if actual_n_components == 3:
+                fig = px.scatter_3d(
+                    df_viz, x='x', y='y', z='z', color=color_col,
+                    size='vote_average', hover_data=['title', 'cluster'], color_continuous_scale='Viridis',
+                    title=f'Clusters colored by {title_suffix}', category_orders={'cluster_label': cluster_label_order},
+                    **symbol_args
+                )
+            else:
+                fig = px.scatter(
+                    df_viz, x='x', y='y', color=color_col, size='vote_average',
+                    hover_data=['title', 'cluster'], color_continuous_scale='Viridis',
+                    title=f'Clusters colored by {title_suffix}', category_orders={'cluster_label': cluster_label_order},
+                    **symbol_args
+                )
+
+            # Hide in-plot legends for symbol traces so the continuous colorbar remains
+            try:
+                # if shapes disabled we don't need symbol legends
+                if shapes_enabled:
+                    fig.update_traces(showlegend=False)
+                else:
+                    # force a single marker symbol for all traces
+                    fig.update_traces(marker_symbol='circle')
+            except Exception:
+                pass
+
+        else:
+            # Profitability (Individual): color by cluster, shape by profitable/not profitable
+            title_suffix = 'profitability (individual 0/1)'
+
+            # prepare categorical cluster labels for color encoding
+            cluster_ids = sorted(df_viz['cluster'].unique())
+            cluster_label_order = [str(cid) for cid in cluster_ids]
+            df_viz['cluster_label'] = df_viz['cluster'].astype(str)
+            df_viz['cluster_label'] = pd.Categorical(df_viz['cluster_label'], categories=cluster_label_order, ordered=True)
+
+            # build discrete color map per cluster (reuse HSV palette)
+            n_cls = len(cluster_ids)
+            hsv_colors = make_hsv_palette(n_cls)
+            color_map = {str(cid): hsv_colors[i] for i, cid in enumerate(cluster_ids)}
+
+            # prepare profitable/not profitable shape labels
+            df_viz['is_profitable_label'] = df_viz['is_profitable'].apply(lambda v: 'Profitable' if int(v) == 1 else 'Not Profitable')
+            profit_order = ['Not Profitable', 'Profitable']
+            df_viz['is_profitable_label'] = pd.Categorical(df_viz['is_profitable_label'], categories=profit_order, ordered=True)
+
+            # symbol sequence for profit labels (keep two distinct symbols)
+            PROF_SYMBOLS = ['x', 'circle']
+
+            # decide whether to encode profitability as shapes or not
+            if shapes_enabled:
+                profit_symbol_args = {'symbol': 'is_profitable_label', 'symbol_sequence': PROF_SYMBOLS}
+            else:
+                profit_symbol_args = {}
+
+            if actual_n_components == 3:
+                fig = px.scatter_3d(
+                    df_viz,
+                    x='x', y='y', z='z',
+                    color='cluster_label',
+                    color_discrete_map=color_map,
+                    size='vote_average',
+                    hover_data=['title', 'cluster', 'is_profitable_label'],
+                    title=f'Clusters colored by cluster (shapes = {title_suffix})',
+                    category_orders={'cluster_label': cluster_label_order, 'is_profitable_label': profit_order},
+                    **profit_symbol_args
+                )
+            else:
+                fig = px.scatter(
+                    df_viz,
+                    x='x', y='y',
+                    color='cluster_label',
+                    color_discrete_map=color_map,
+                    size='vote_average',
+                    hover_data=['title', 'cluster', 'is_profitable_label'],
+                    title=f'Clusters colored by cluster (shapes = {title_suffix})',
+                    category_orders={'cluster_label': cluster_label_order, 'is_profitable_label': profit_order},
+                    **profit_symbol_args
+                )
+
+            # if shapes disabled force a single marker for all traces
+            if not shapes_enabled:
+                try:
+                    fig.update_traces(marker_symbol='circle')
+                except Exception:
+                    pass
+
+        # Display small legends side-by-side to avoid overlap between color and shape legends
+        try:
+            if color_by == "Profitability (Cluster Mean)":
+                # show shape legend for clusters and a compact colorbar info panel
+                try:
+                    # build only the external shape legend (clusters -> symbol). The
+                    # continuous colorbar for cluster mean profitability is left inside
+                    # the main plot itself to avoid duplicating/overlapping legends.
+                    shape_legend_fig = _make_shape_legend_fig(cluster_ids, SYMBOL_SEQUENCE)
+
+                    # Render the external shape legend on the page (outside the plot)
+                    # — show it full-width above the plot so it is always visible.
+                    st.markdown("**Shape legend (clusters)**")
+                    st.plotly_chart(shape_legend_fig, use_container_width=True)
+                except Exception:
+                    pass
+
+            elif color_by == "Profitability (Individual)":
+                # show discrete color legend for clusters and shape legend for profit labels side-by-side
+                try:
+                    color_legend_fig = _make_color_legend_fig(cluster_ids, {str(k): v for k, v in color_map.items()})
+                    # build profit-shape legend only if shapes are enabled
+                    def _make_profit_shape_legend(profit_order, prof_symbols):
+                        import plotly.graph_objects as go
+                        figp = go.Figure()
+                        for i, label in enumerate(profit_order):
+                            sym = prof_symbols[i % len(prof_symbols)]
+                            figp.add_trace(go.Scatter(
+                                x=[i], y=[0], mode='markers',
+                                marker=dict(color='#444', size=12, symbol=sym),
+                                name=label, showlegend=True
+                            ))
+                        figp.update_layout(
+                            height=60, margin=dict(l=0, r=0, t=0, b=0),
+                            xaxis=dict(visible=False), yaxis=dict(visible=False),
+                            legend=dict(orientation='h')
+                        )
+                        return figp
+
+                    if shapes_enabled:
+                        shape_legend_fig = _make_profit_shape_legend(profit_order, PROF_SYMBOLS)
+                        lcol, rcol = st.columns(2)
+                        with lcol:
+                            st.markdown("**Color legend (clusters)**")
+                            st.plotly_chart(color_legend_fig, use_container_width=True)
+                        with rcol:
+                            st.markdown("**Shape legend (profitability)**")
+                            st.plotly_chart(shape_legend_fig, use_container_width=True)
+                    else:
+                        # only show color legend when shapes disabled
+                        st.markdown("**Color legend (clusters)**")
+                        st.plotly_chart(color_legend_fig, use_container_width=True)
+                except Exception:
+                    pass
+        except Exception:
+            # fail silently if legends cannot be built
+            pass
+
+        # Render the main figure in the previously reserved left column if present,
+        # otherwise render normally. This ensures the external shape legend (right
+        # column) appears beside the plot rather than overlapping it.
+        try:
+            # if we created columns above, render into the left column
+            if 'lcol' in locals():
+                with lcol:
+                    fig.update_layout(height=700, margin=dict(l=0, r=0, t=40, b=0))
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                fig.update_layout(height=700, margin=dict(l=0, r=0, t=40, b=0))
+                st.plotly_chart(fig, width='stretch')
+        except Exception:
+            # fallback
+            fig.update_layout(height=700, margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig, width='stretch')
+
+    # Tab 4: Representatives
+    with tab4:
+        st.subheader("🎬 Cluster Representatives (Profitability)")
+        n_representatives = st.slider("Number of representative movies per cluster", 1, 10, 3)
+        if st.button("🔄 Update Representatives (Profitability)"):
+            with st.spinner("Calculating cluster representatives..."):
+                representatives = get_cluster_representative_movies(df_movies, cluster_labels, embeddings, n_per_cluster=n_representatives)
+                st.session_state['prof_cluster_representatives'] = representatives
+
+        if 'prof_cluster_representatives' in st.session_state:
+            representatives = st.session_state['prof_cluster_representatives']
+            sorted_clusters = sorted(representatives.keys())
+            for cluster_id in sorted_clusters:
+                cluster_info = cluster_stats[cluster_stats['cluster_id'] == cluster_id]
+                roi_mean = float(cluster_info['roi_mean'].values[0]) if len(cluster_info) > 0 and 'roi_mean' in cluster_info.columns else 0.0
+                n_movies = int(cluster_info['n_movies'].values[0]) if len(cluster_info) > 0 else 0
+                with st.expander(f"Cluster {cluster_id} - ROI: {roi_mean:.2f} ({n_movies} movies)"):
+                    for movie in representatives[cluster_id]:
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.markdown(f"**{movie['title']}**")
+                            if pd.notna(movie.get('overview')):
+                                st.write(movie['overview'][:200] + "..." if len(str(movie.get('overview', ''))) > 200 else movie.get('overview', ''))
+                        with col2:
+                            if pd.notna(movie.get('roi')):
+                                st.metric("ROI", f"{movie['roi']:.2f}")
+                            if pd.notna(movie.get('vote_average')):
+                                st.metric("Rating", f"{movie['vote_average']:.1f}")
+                        st.markdown("---")
+        else:
+            st.info("👆 Click 'Update Representatives (Profitability)' to see representative movies for each cluster.")
 
 
 if __name__ == "__main__":
