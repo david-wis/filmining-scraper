@@ -72,7 +72,7 @@ def main():
     # When in Revenue page show its sections; when in Profitability show profitability sections
     # Revenue sections (legacy)
     revenue_sections = [
-        "🏠 Home", "🔮 Predict ROI", "📊 Data Analysis", "📝 Semantic Analysis",
+        "🏠 Home", "🔮 Predict ROI", "📊 Data Analysis",
         "🎯 Thematic Clustering", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis"
     ]
     # Profitability sections
