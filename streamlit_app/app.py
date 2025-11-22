@@ -15,6 +15,7 @@ from utils.database import test_database_connection
 from models.data_loader import load_movies_data, load_genres_data, prepare_movies_for_modeling, get_data_summary
 from models.feature_engineering import FeatureEngineer
 from models.model_trainer import ROIModelTrainer
+from models.profitability_trainer import ProfitabilityModelTrainer
 
 
 # Page configuration
@@ -64,12 +65,25 @@ def main():
     </div>
     """, unsafe_allow_html=True)
     
-    # Sidebar navigation
+    # Sidebar navigation: top-level pages and per-page sections
     st.sidebar.title("Navigation")
-    page = st.sidebar.selectbox(
-        "Choose a page:",
-        ["🏠 Home", "🔮 Predict ROI", "📊 Data Analysis", "📝 Semantic Analysis", "🎯 Thematic Clustering", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis"]
-    )
+    top_section = st.sidebar.selectbox("Page:", ["Revenue", "Profitability"]) 
+
+    # When in Revenue page show its sections; when in Profitability show profitability sections
+    # Revenue sections (legacy)
+    revenue_sections = [
+        "🏠 Home", "🔮 Predict ROI", "📊 Data Analysis", "📝 Semantic Analysis",
+        "🎯 Thematic Clustering", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis"
+    ]
+    # Profitability sections
+    profitability_sections = [
+        "🏠 Profitability Overview", "🔮 Predict Profitability", "🤖 Train Classifier", "📈 Model Performance", "🔬 Sensitivity Analysis"
+    ]
+
+    if top_section == "Revenue":
+        page = st.sidebar.selectbox("Section:", revenue_sections)
+    else:
+        page = st.sidebar.selectbox("Section:", profitability_sections)
     # Note: per-plot selectors are used instead of a global sidebar plot selector.
     
     # Database connection check
@@ -95,24 +109,40 @@ def main():
         st.session_state.model_trainer = ROIModelTrainer()
     if 'feature_engineer' not in st.session_state:
         st.session_state.feature_engineer = FeatureEngineer()
+    if 'profitability_trainer' not in st.session_state:
+        st.session_state.profitability_trainer = ProfitabilityModelTrainer()
     
-    # Route to different pages
-    if page == "🏠 Home":
-        show_home_page(data_summary, df_clean)
-    elif page == "🔮 Predict ROI":
-        show_prediction_page(df_clean, df_genres)
-    elif page == "📊 Data Analysis":
-        show_data_analysis_page(df_clean, df_genres)
-    elif page == "📝 Semantic Analysis":
-        show_semantic_analysis_page()
-    elif page == "🎯 Thematic Clustering":
-        show_clustering_page()
-    elif page == "🤖 Model Training":
-        show_model_training_page(df_clean)
-    elif page == "📈 Model Performance":
-        show_model_performance_page()
-    elif page == "🔬 Sensitivity Analysis":
-        show_sensitivity_analysis_page(df_clean, df_genres)
+    # Route based on the selected top page and section
+    if top_section == "Profitability":
+        # profitability pages
+        if page == "🏠 Profitability Overview":
+            show_profitability_home(data_summary, df_clean)
+        elif page == "🔮 Predict Profitability":
+            show_profitability_prediction(df_clean, df_genres)
+        elif page == "🤖 Train Classifier":
+            show_profitability_training(df_clean)
+        elif page == "📈 Model Performance":
+            show_profitability_performance()
+        elif page == "🔬 Sensitivity Analysis":
+            show_profitability_sensitivity_page(df_clean, df_genres)
+    else:
+        # revenue pages (legacy)
+        if page == "🏠 Home":
+            show_home_page(data_summary, df_clean)
+        elif page == "🔮 Predict ROI":
+            show_prediction_page(df_clean, df_genres)
+        elif page == "📊 Data Analysis":
+            show_data_analysis_page(df_clean, df_genres)
+        elif page == "📝 Semantic Analysis":
+            show_semantic_analysis_page()
+        elif page == "🎯 Thematic Clustering":
+            show_clustering_page()
+        elif page == "🤖 Model Training":
+            show_model_training_page(df_clean)
+        elif page == "📈 Model Performance":
+            show_model_performance_page()
+        elif page == "🔬 Sensitivity Analysis":
+            show_sensitivity_analysis_page(df_clean, df_genres)
 
 
 def _get_target_column():
@@ -244,6 +274,560 @@ def show_home_page(data_summary, df_clean):
     
     The model uses features like budget, runtime, genres, country, and language to predict ROI.
     """)
+
+
+def show_profitability_home(data_summary, df_clean):
+    """Overview page for profitability section."""
+    st.header("📊 Profitability Overview")
+
+    # Ensure threshold exists in session
+    if 'profitability_threshold' not in st.session_state:
+        st.session_state.profitability_threshold = 0.0
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Movies", f"{data_summary.get('total_movies', 0):,}")
+    with col2:
+        st.metric("Profitable Movies (default)", f"{data_summary.get('profitable_movies', 0):,}", delta=f"{data_summary.get('profitability_rate', 0):.1f}%")
+    with col3:
+        st.metric("Avg ROI", f"{data_summary.get('avg_roi', 0):.2f}")
+    with col4:
+        thr = st.session_state.profitability_threshold
+        st.metric("Current Threshold", f"{thr:.2f}", help="Threshold (ROI) used to label movies as profitable")
+
+    st.markdown(
+        "Use the **Train Classifier** page to set a custom profitability threshold and train a classification model to predict whether a movie is profitable."
+    )
+
+
+def show_profitability_prediction(df_clean, df_genres):
+    """Prediction page for profitability classification."""
+    st.header("🔮 Predict Profitability")
+
+    if not st.session_state.profitability_trainer.is_trained:
+        st.warning("⚠️ Classifier not trained yet. Please train the classifier first in the 'Train Classifier' page.")
+        return
+
+    st.markdown("Enter movie features to predict probability of being profitable:")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        title = st.text_input("Movie Title", value="My Movie")
+        budget = st.number_input("Budget (USD)", min_value=100000, max_value=500000000, value=10000000, step=1000000)
+        runtime = st.number_input("Runtime (minutes)", min_value=60, max_value=300, value=120, step=5)
+        languages = df_clean['original_language'].value_counts().head(10).index.tolist()
+        original_language = st.selectbox("Original Language", languages)
+    with col2:
+        countries = df_clean['main_country'].value_counts().head(10).index.tolist()
+        main_country = st.selectbox("Main Country", countries)
+        adult = st.checkbox("Adult Content", value=False)
+        all_genres = df_genres['name'].tolist() if df_genres is not None else []
+        selected_genres = st.multiselect("Select Genres", all_genres, default=["Drama"])
+
+    if st.button("Predict Profitability", type="primary"):
+        movie_data = {
+            'title': title,
+            'budget': budget,
+            'runtime': runtime,
+            'release_date': '2024-01-01',
+            'original_language': original_language,
+            'main_country': main_country,
+            'vote_average': 0,
+            'vote_count': 0,
+            'adult': adult,
+            'status': 'Released',
+            'genres': ', '.join(selected_genres),
+            'production_countries': f'[{{"name": "{main_country}"}}]'
+        }
+        try:
+            X_pred = st.session_state.feature_engineer.create_prediction_features(movie_data)
+            prob = st.session_state.profitability_trainer.predict_proba(X_pred)
+            label = st.session_state.profitability_trainer.predict_label(X_pred)
+            prob_val = float(prob[0]) if prob is not None else None
+
+            if prob_val is not None:
+                st.success(f"Probability of being profitable: {prob_val*100:.1f}%")
+            st.info(f"Predicted label: {'Profitable' if int(label[0]) == 1 else 'Not Profitable'}")
+        except Exception as e:
+            st.error(f"❌ Error making prediction: {e}")
+
+
+def show_profitability_training(df_clean):
+    """Training UI for profitability classifier."""
+    st.header("🤖 Train Profitability Classifier")
+
+    if df_clean is None or df_clean.empty:
+        st.error("No data available for training.")
+        return
+
+    st.markdown("Set the profitability threshold (ROI) to create binary labels, then train a classifier.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        threshold = st.number_input("Profitability threshold (ROI)", value=0.0, step=0.01, format="%.2f")
+        optimize_hyperparams = st.checkbox("Optimize Hyperparameters", value=True)
+    with col2:
+        test_size = st.slider("Test Size", 0.1, 0.4, 0.2, 0.05)
+
+    # store selected threshold in session for display
+    st.session_state.profitability_threshold = float(threshold)
+    # Feature selection UI (mirror revenue training flow)
+    show_features = st.checkbox("Show all features before training", value=False, key="prof_show_features")
+    enable_feature_tinkering = st.checkbox("Enable feature tinkering (manually select features)", value=False, key="prof_enable_feature_tinkering")
+
+    # initialize selected features container for profitability if not present
+    if 'prof_selected_features' not in st.session_state:
+        st.session_state.prof_selected_features = None
+
+    # Prepare df_local (labels) so we can preview features even before training
+    df_local = df_clean.copy()
+    if 'roi' not in df_local.columns:
+        if 'revenue' in df_local.columns and 'budget' in df_local.columns:
+            df_local['roi'] = (df_local['revenue'] - df_local['budget']) / df_local['budget']
+    df_local['is_profitable'] = (df_local['roi'] > threshold).astype(int)
+
+    if show_features:
+        with st.spinner("Preparing features preview..."):
+            try:
+                df_features = st.session_state.feature_engineer.create_features(df_local)
+                X_preview, _, _, _, feature_names = st.session_state.feature_engineer.prepare_modeling_data(
+                    df_features, test_size=test_size, random_state=42
+                )
+
+                st.success(f"✅ Total features available: **{len(feature_names)}**")
+
+                # Group features by category (same grouping used in revenue training)
+                numeric_names = ['budget_per_minute', 'budget_log', 'runtime']
+                numeric_features = [f for f in feature_names if f in numeric_names]
+
+                runtime_blocks = [f for f in feature_names if f.startswith('runtime_') and f != 'runtime_category']
+                genre_features = [f for f in feature_names if f.startswith('genre_')]
+                country_features = [f for f in feature_names if f.startswith('country_')]
+                language_features = [f for f in feature_names if f.startswith('language_')]
+
+                classification_prefixes = ['genre_', 'country_', 'language_', 'runtime_']
+                other_features = [f for f in feature_names if f not in numeric_features and not any(f.startswith(p) for p in classification_prefixes)]
+
+                feature_categories = {
+                    'Numeric Features': numeric_features,
+                    'Runtime Blocks': runtime_blocks,
+                    'Genres': genre_features,
+                    'Countries': country_features,
+                    'Languages': language_features,
+                    'Other': other_features
+                }
+
+                # Initialize prof_enabled_feature_categories if missing
+                if 'prof_enabled_feature_categories' not in st.session_state:
+                    enabled = set()
+                    # enable defaults if available
+                    display_order = [
+                        'budget_per_minute', 'budget_log', 'runtime',
+                        'runtime_blocks', 'genres', 'countries', 'languages', 'other'
+                    ]
+                    for itm in display_order:
+                        if itm == 'budget_per_minute' and any(f == 'budget_per_minute' for f in feature_names):
+                            enabled.add(itm)
+                        if itm == 'budget_log' and any(f == 'budget_log' for f in feature_names):
+                            enabled.add(itm)
+                        if itm == 'runtime' and any(f == 'runtime' for f in feature_names):
+                            enabled.add(itm)
+                        if itm == 'runtime_blocks' and feature_categories.get('Runtime Blocks'):
+                            enabled.add(itm)
+                        if itm == 'genres' and feature_categories.get('Genres'):
+                            enabled.add(itm)
+                        if itm == 'countries' and feature_categories.get('Countries'):
+                            enabled.add(itm)
+                        if itm == 'languages' and feature_categories.get('Languages'):
+                            enabled.add(itm)
+                        if itm == 'other' and feature_categories.get('Other'):
+                            enabled.add(itm)
+                    st.session_state.prof_enabled_feature_categories = enabled
+
+                # Render feature group checkboxes
+                display_order = [
+                    'budget_per_minute', 'budget_log', 'runtime',
+                    'runtime_blocks', 'genres', 'countries', 'languages', 'other'
+                ]
+
+                for item in display_order:
+                    if item == 'budget_per_minute':
+                        underlying = [f for f in feature_names if f == 'budget_per_minute']
+                        label = 'budget_per_minute'
+                    elif item == 'budget_log':
+                        underlying = [f for f in feature_names if f == 'budget_log']
+                        label = 'budget_log'
+                    elif item == 'runtime':
+                        underlying = [f for f in feature_names if f == 'runtime']
+                        label = 'runtime'
+                    elif item == 'runtime_blocks':
+                        underlying = feature_categories.get('Runtime Blocks', [])
+                        short_names = [f.replace('runtime_', '') for f in underlying]
+                        label = f"Runtime Blocks: {', '.join(short_names)}"
+                    elif item == 'genres':
+                        underlying = feature_categories.get('Genres', [])
+                        short_names = [f.replace('genre_', '') for f in underlying]
+                        label = f"Genres: {', '.join(short_names)}"
+                    elif item == 'countries':
+                        underlying = feature_categories.get('Countries', [])
+                        short_names = [f.replace('country_', '') for f in underlying]
+                        label = f"Countries: {', '.join(short_names)}"
+                    elif item == 'languages':
+                        underlying = feature_categories.get('Languages', [])
+                        short_names = [f.replace('language_', '') for f in underlying]
+                        label = f"Languages: {', '.join(short_names)}"
+                    else:
+                        underlying = feature_categories.get('Other', [])
+                        label = 'Other'
+
+                    safe_key = f"prof_feat_{item}"
+                    is_enabled = item in st.session_state.prof_enabled_feature_categories
+                    checked = st.checkbox(label, value=is_enabled, key=safe_key, disabled=not enable_feature_tinkering)
+                    if enable_feature_tinkering:
+                        if checked:
+                            st.session_state.prof_enabled_feature_categories.add(item)
+                        else:
+                            st.session_state.prof_enabled_feature_categories.discard(item)
+
+                # Rebuild selected features from enabled items
+                selected = set()
+                if 'budget_per_minute' in st.session_state.prof_enabled_feature_categories:
+                    selected.update([f for f in numeric_features if f == 'budget_per_minute'])
+                if 'budget_log' in st.session_state.prof_enabled_feature_categories:
+                    selected.update([f for f in numeric_features if f == 'budget_log'])
+                if 'runtime' in st.session_state.prof_enabled_feature_categories:
+                    selected.update([f for f in numeric_features if f == 'runtime'])
+                if 'other' in st.session_state.prof_enabled_feature_categories:
+                    selected.update(feature_categories.get('Other', []))
+                if 'runtime_blocks' in st.session_state.prof_enabled_feature_categories:
+                    selected.update(feature_categories.get('Runtime Blocks', []))
+                if 'genres' in st.session_state.prof_enabled_feature_categories:
+                    selected.update(feature_categories.get('Genres', []))
+                if 'countries' in st.session_state.prof_enabled_feature_categories:
+                    selected.update(feature_categories.get('Countries', []))
+                if 'languages' in st.session_state.prof_enabled_feature_categories:
+                    selected.update(feature_categories.get('Languages', []))
+
+                st.session_state.prof_selected_features = selected
+
+                selected_count = len(st.session_state.prof_selected_features)
+                st.metric("Selected Features", f"{selected_count} / {len(feature_names)}")
+
+                if selected_count == 0:
+                    st.error("❌ Please select at least one feature to train the classifier.")
+                    # don't return; allow user to change selection
+
+            except Exception as e:
+                st.error(f"❌ Error preparing features preview: {str(e)}")
+
+    # Training button
+    if st.button("🚀 Train Classifier", type="primary"):
+        with st.spinner("Preparing data and training classifier..."):
+            try:
+                # create a copy and set binary target based on threshold
+                # (recompute to ensure latest threshold)
+                df_local = df_clean.copy()
+                if 'roi' not in df_local.columns:
+                    if 'revenue' in df_local.columns and 'budget' in df_local.columns:
+                        df_local['roi'] = (df_local['revenue'] - df_local['budget']) / df_local['budget']
+                df_local['is_profitable'] = (df_local['roi'] > threshold).astype(int)
+
+                # instruct feature engineer to use the new target
+                st.session_state.feature_engineer.target_column = 'is_profitable'
+
+                # create features and prepare modeling data
+                df_features = st.session_state.feature_engineer.create_features(df_local)
+                X_train, X_test, y_train, y_test, feature_names = st.session_state.feature_engineer.prepare_modeling_data(
+                    df_features, test_size=test_size, random_state=42
+                )
+
+                # Apply feature selection if tinkering enabled and selection provided
+                if enable_feature_tinkering and st.session_state.prof_selected_features:
+                    selected_features_list = list(st.session_state.prof_selected_features)
+                    # filter to only features present
+                    valid_selected_features = [f for f in selected_features_list if f in df_features.columns]
+                    if len(valid_selected_features) == 0:
+                        st.error("❌ None of the selected features are available in the dataset.")
+                        return
+
+                    st.info(f"🔍 Training with {len(valid_selected_features)} selected features (out of {len(feature_names)} total)")
+
+                    # prepare unscaled data for selected features and refit scaler
+                    X_unscaled = df_features[valid_selected_features].fillna(0).replace([np.inf, -np.inf], 0)
+                    y_full = df_features[st.session_state.feature_engineer.target_column]
+                    valid_indices = ~y_full.isna()
+                    X_unscaled = X_unscaled[valid_indices]
+                    y_full = y_full[valid_indices]
+
+                    from sklearn.model_selection import train_test_split
+                    from sklearn.preprocessing import StandardScaler
+
+                    X_train_unscaled, X_test_unscaled, y_train, y_test = train_test_split(
+                        X_unscaled, y_full, test_size=test_size, random_state=42
+                    )
+
+                    st.session_state.feature_engineer.scaler = StandardScaler()
+                    X_train = pd.DataFrame(
+                        st.session_state.feature_engineer.scaler.fit_transform(X_train_unscaled),
+                        columns=valid_selected_features,
+                        index=X_train_unscaled.index
+                    )
+                    X_test = pd.DataFrame(
+                        st.session_state.feature_engineer.scaler.transform(X_test_unscaled),
+                        columns=valid_selected_features,
+                        index=X_test_unscaled.index
+                    )
+
+                    feature_names = valid_selected_features
+                    st.session_state.feature_engineer.feature_columns = valid_selected_features
+
+                # train classifier
+                metrics = st.session_state.profitability_trainer.train_model(
+                    X_train, y_train, X_test, y_test, optimize_hyperparams=optimize_hyperparams
+                )
+
+                st.success("✅ Classifier trained successfully!")
+
+                # show key metrics
+                st.subheader("📊 Training Metrics")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Test Accuracy", f"{metrics.get('test_accuracy', 0):.3f}")
+                with col2:
+                    st.metric("Test ROC AUC", f"{metrics.get('test_roc_auc', 0):.3f}" if metrics.get('test_roc_auc') is not None else "N/A")
+                with col3:
+                    st.metric("Test F1", f"{metrics.get('test_f1', 0):.3f}")
+
+            except Exception as e:
+                st.error(f"❌ Error training classifier: {e}")
+
+
+def show_profitability_performance():
+    """Show classifier performance and feature importance."""
+    st.header("📈 Profitability Model Performance")
+
+    trainer = st.session_state.profitability_trainer
+    if not trainer.is_trained:
+        st.warning("⚠️ No classifier trained yet. Train a classifier first.")
+        return
+
+    metrics = trainer.training_metrics
+
+    st.subheader("📊 Metrics")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Test Accuracy", f"{metrics.get('test_accuracy', 0):.3f}")
+    with col2:
+        st.metric("Test Precision", f"{metrics.get('test_precision', 0):.3f}")
+    with col3:
+        st.metric("Test Recall", f"{metrics.get('test_recall', 0):.3f}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Test F1", f"{metrics.get('test_f1', 0):.3f}")
+    with col2:
+        roc = metrics.get('test_roc_auc', None)
+        st.metric("ROC AUC", f"{roc:.3f}" if roc is not None else "N/A")
+
+    # Confusion matrix
+    cm = metrics.get('confusion_matrix', None)
+    if cm is not None:
+        st.subheader("Confusion Matrix (Test)")
+        cm_df = pd.DataFrame(cm, columns=["Pred 0", "Pred 1"], index=["True 0", "True 1"])
+        st.dataframe(cm_df)
+
+    # Feature importance
+    st.subheader("🔍 Feature Importance")
+    fig = trainer.get_feature_importance_plot()
+    if fig:
+        st.plotly_chart(fig, width="stretch")
+    else:
+        st.info("Feature importance not available.")
+
+
+def show_profitability_sensitivity_page(df_clean, df_genres):
+    """Sensitivity analysis for profitability classifier.
+
+    Shows how the probability of being profitable changes when varying single features
+    (budget, runtime, country, language, genre) while keeping others at baseline.
+    """
+    st.header("🔬 Profitability Sensitivity Analysis")
+
+    trainer = st.session_state.profitability_trainer
+    if not trainer.is_trained:
+        st.warning("⚠️ Classifier not trained yet. Please train the classifier first in the 'Train Classifier' page.")
+        return
+
+    # Baseline movie configuration
+    st.subheader("📝 Baseline Movie Configuration")
+    col1, col2 = st.columns(2)
+    with col1:
+        baseline_budget = st.number_input("Baseline Budget (USD)", min_value=100000, max_value=500000000, value=10000000, step=1000000)
+        baseline_runtime = st.number_input("Baseline Runtime (minutes)", min_value=60, max_value=300, value=120, step=5)
+        languages = df_clean['original_language'].value_counts().head(10).index.tolist()
+        baseline_language = st.selectbox("Baseline Language", languages, index=0 if 'en' not in languages else languages.index('en'))
+    with col2:
+        countries = df_clean['main_country'].value_counts().head(10).index.tolist()
+        baseline_country = st.selectbox("Baseline Country", countries)
+        baseline_adult = st.checkbox("Baseline Adult Content", value=False)
+        all_genres = df_genres['name'].tolist() if df_genres is not None else []
+        baseline_genres = st.multiselect("Baseline Genres", all_genres, default=[all_genres[0]] if all_genres else [])
+
+    baseline_movie = {
+        'title': 'Baseline Movie',
+        'budget': baseline_budget,
+        'runtime': baseline_runtime,
+        'release_date': '2024-01-01',
+        'original_language': baseline_language,
+        'main_country': baseline_country,
+        'vote_average': 0,
+        'vote_count': 0,
+        'adult': baseline_adult,
+        'status': 'Released',
+        'genres': ', '.join(baseline_genres) if baseline_genres else '',
+        'production_countries': f'[{{"name": "{baseline_country}"}}]'
+    }
+
+    st.markdown("This page shows how the *probability* of being profitable changes when varying a single feature.")
+
+    analysis_tabs = st.tabs(["💰 Budget Impact", "⏱️ Runtime Impact", "🌍 Country Impact", "🗣️ Language Impact", "🎭 Genre Impact"])
+
+    # Budget Impact
+    with analysis_tabs[0]:
+        st.markdown("### How probability of profitability changes with budget")
+        budget_min = st.number_input("Min Budget", min_value=100000, value=100000, step=100000, key="prof_budget_min")
+        budget_max = st.number_input("Max Budget", min_value=budget_min, value=100000000, step=1000000, key="prof_budget_max")
+        budget_steps = st.slider("Number of points", min_value=10, max_value=200, value=100, key="prof_budget_steps")
+
+        budgets = np.linspace(budget_min, budget_max, budget_steps)
+        probs = []
+        with st.spinner("Calculating probabilities..."):
+            for b in budgets:
+                movie = baseline_movie.copy()
+                movie['budget'] = float(b)
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    p = trainer.predict_proba(X_pred)
+                    probs.append(float(p[0]) if p is not None else np.nan)
+                except Exception:
+                    probs.append(np.nan)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=budgets, y=probs, mode='lines+markers', name='Prob(Profitable)'))
+        fig.update_layout(title='Probability of Profitability vs Budget', xaxis_title='Budget (USD)', yaxis_title='Probability')
+        st.plotly_chart(fig, width='stretch')
+
+        # Summary
+        valid = [p for p in probs if p is not None and not (isinstance(p, float) and np.isnan(p))]
+        if valid:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric('Min Prob', f"{min(valid):.3f}")
+            with col2:
+                st.metric('Max Prob', f"{max(valid):.3f}")
+            with col3:
+                st.metric('Range', f"{max(valid)-min(valid):.3f}")
+        else:
+            st.info('No valid predictions produced.')
+
+    # Runtime Impact
+    with analysis_tabs[1]:
+        st.markdown("### How probability of profitability changes with runtime")
+        runtime_min = st.number_input("Min Runtime (minutes)", min_value=45, value=60, step=5, key='prof_runtime_min')
+        runtime_max = st.number_input("Max Runtime (minutes)", min_value=runtime_min, value=240, step=5, key='prof_runtime_max')
+        runtime_steps = st.slider("Number of points", min_value=10, max_value=100, value=50, key='prof_runtime_steps')
+
+        runtimes = np.linspace(runtime_min, runtime_max, runtime_steps)
+        probs = []
+        with st.spinner("Calculating probabilities..."):
+            for rt in runtimes:
+                movie = baseline_movie.copy()
+                movie['runtime'] = int(rt)
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    p = trainer.predict_proba(X_pred)
+                    probs.append(float(p[0]) if p is not None else np.nan)
+                except Exception:
+                    probs.append(np.nan)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=runtimes, y=probs, mode='lines+markers', name='Prob(Profitable)'))
+        fig.update_layout(title='Probability of Profitability vs Runtime', xaxis_title='Runtime (minutes)', yaxis_title='Probability')
+        st.plotly_chart(fig, width='stretch')
+
+    # Country Impact
+    with analysis_tabs[2]:
+        st.markdown("### Probability by Production Country")
+        top_n_countries = st.slider("Number of top countries to analyze", min_value=5, max_value=20, value=10, key='prof_country_n')
+        countries = df_clean['main_country'].value_counts().head(top_n_countries).index.tolist()
+        probs = []
+        with st.spinner("Calculating probabilities..."):
+            for country in countries:
+                movie = baseline_movie.copy()
+                movie['main_country'] = country
+                movie['production_countries'] = f'[{{"name": "{country}"}}]'
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    p = trainer.predict_proba(X_pred)
+                    probs.append(float(p[0]) if p is not None else np.nan)
+                except Exception:
+                    probs.append(np.nan)
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=countries, y=probs, name='Prob(Profitable)'))
+        fig.update_layout(title='Probability of Profitability by Country', xaxis_title='Country', yaxis_title='Probability', height=500)
+        st.plotly_chart(fig, width='stretch')
+
+    # Language Impact
+    with analysis_tabs[3]:
+        st.markdown("### Probability by Original Language")
+        top_n_lang = st.slider("Number of top languages to analyze", min_value=5, max_value=20, value=10, key='prof_lang_n')
+        languages = df_clean['original_language'].value_counts().head(top_n_lang).index.tolist()
+        probs = []
+        with st.spinner("Calculating probabilities..."):
+            for lang in languages:
+                movie = baseline_movie.copy()
+                movie['original_language'] = lang
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    p = trainer.predict_proba(X_pred)
+                    probs.append(float(p[0]) if p is not None else np.nan)
+                except Exception:
+                    probs.append(np.nan)
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=languages, y=probs, name='Prob(Profitable)'))
+        fig.update_layout(title='Probability of Profitability by Language', xaxis_title='Language', yaxis_title='Probability', height=500)
+        st.plotly_chart(fig, width='stretch')
+
+    # Genre Impact
+    with analysis_tabs[4]:
+        st.markdown("### Probability when adding individual genres")
+        genres_to_test = df_genres['name'].tolist() if df_genres is not None else []
+        probs = []
+        labels = []
+        with st.spinner("Calculating probabilities..."):
+            for genre in genres_to_test:
+                movie = baseline_movie.copy()
+                movie['genres'] = genre
+                try:
+                    X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+                    p = trainer.predict_proba(X_pred)
+                    probs.append(float(p[0]) if p is not None else np.nan)
+                    labels.append(genre)
+                except Exception:
+                    probs.append(np.nan)
+                    labels.append(genre)
+
+        df_plot = pd.DataFrame({'Genre': labels, 'Prob': probs}).sort_values('Prob', ascending=False)
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=df_plot['Genre'], y=df_plot['Prob'], name='Prob(Profitable)'))
+        fig.update_layout(title='Probability of Profitability by Genre (single genre)', xaxis_title='Genre', yaxis_title='Probability', height=600)
+        st.plotly_chart(fig, width='stretch')
+
+
+
+
 
 
 def show_prediction_page(df_clean, df_genres):

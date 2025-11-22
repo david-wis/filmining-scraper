@@ -1,0 +1,1188 @@
+diff --git a/streamlit_app/app.py b/streamlit_app/app.py
+index 210a475..2e00483 100644
+--- a/streamlit_app/app.py
++++ b/streamlit_app/app.py
+@@ -14,7 +14,7 @@ import os
+ from utils.database import test_database_connection
+ from models.data_loader import load_movies_data, load_genres_data, prepare_movies_for_modeling, get_data_summary
+ from models.feature_engineering import FeatureEngineer
+-from models.model_trainer import ROIModelTrainer
++from models.model_trainer import ROIModelTrainer, ProfitabilityModelTrainer
+ 
+ 
+ # Page configuration
+@@ -68,7 +68,7 @@ def main():
+     st.sidebar.title("Navigation")
+     page = st.sidebar.selectbox(
+         "Choose a page:",
+-        ["🏠 Home", "🔮 Predict ROI", "📊 Data Analysis", "📝 Semantic Analysis", "🎯 Thematic Clustering", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis"]
++        ["🏠 Home", "📊 Data Analysis", "🎯 Thematic Clustering", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis", "🔮 Predict ROI","📝 Semantic Analysis", ]
+     )
+     # Note: per-plot selectors are used instead of a global sidebar plot selector.
+     
+@@ -90,6 +90,24 @@ def main():
+     df_clean = prepare_movies_for_modeling(df_movies)
+     data_summary = get_data_summary(df_clean)
+ 
++    # Allow a cached, precomputed df_clean to be used (set after model load/training)
++    if 'df_clean_cached' in st.session_state and isinstance(st.session_state.df_clean_cached, pd.DataFrame):
++        try:
++            df_clean = st.session_state.df_clean_cached.copy()
++        except Exception:
++            pass
++    else:
++        # If a profitability classifier was trained/loaded, recompute the dataset-level
++        # `is_profitable` column with the canonical threshold so all pages show consistent
++        # results (this replaces the default dataset column which may have used ROI>0).
++        try:
++            if st.session_state.get('trained_target_type') == 'profitability' or 'profitability_threshold' in st.session_state:
++                thr = st.session_state.get('profitability_threshold', None)
++                df_clean = _recompute_dataset_is_profitable(df_clean, thr)
++        except Exception:
++            # do not block page rendering on recompute errors
++            pass
++
+     # Initialize session state
+     if 'model_trainer' not in st.session_state:
+         st.session_state.model_trainer = ROIModelTrainer()
+@@ -143,7 +161,82 @@ def _plot_target_selector(scope_name: str = ""):
+         key=key,
+         help="Choose whether this chart shows ROI or Revenue"
+     )
+-    return ('revenue', 'Revenue') if choice == 'Revenue' else ('roi', 'ROI')
++    # Replace ROI/Revenue selector with only Profitability as requested
++    return ('is_profitable', 'Profitability')
++
++
++def _get_profitability_threshold_for_plots():
++    """Return the profitability threshold to use for plotting (from trained classifier if available).
++
++    Falls back to 2.0 if not present.
++    """
++    try:
++        trainer = st.session_state.get('model_trainer', None)
++        if trainer is not None and hasattr(trainer, 'threshold'):
++            return float(getattr(trainer, 'threshold'))
++    except Exception:
++        pass
++    return 2.0
++
++
++def _ensure_plot_target(df, tgt):
++    """Ensure the dataframe has the requested plotting target column.
++
++    Supports 'revenue', 'roi' and 'is_profitable'. For 'is_profitable' we derive a binary column
++    using ROI >= threshold where threshold is obtained from the trained classifier if available,
++    otherwise default 2.0.
++    """
++    df = df.copy()
++    if tgt == 'revenue' and 'revenue' not in df.columns:
++        if 'roi' in df.columns and 'budget' in df.columns:
++            df['revenue'] = df['budget'] * (1 + df['roi'])
++    if tgt == 'roi' and 'roi' not in df.columns:
++        if 'revenue' in df.columns and 'budget' in df.columns:
++            df['roi'] = (df['revenue'] - df['budget']) / df['budget']
++    if tgt == 'is_profitable':
++        # create ROI if missing
++        if 'roi' not in df.columns:
++            if 'revenue' in df.columns and 'budget' in df.columns:
++                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
++            else:
++                # Cannot compute ROI; default to not profitable (0)
++                df['is_profitable'] = 0
++                return df
++
++        threshold = _get_profitability_threshold_for_plots()
++        df['is_profitable'] = (df['roi'] >= threshold).astype(int)
++
++    return df
++
++
++def _recompute_dataset_is_profitable(df, threshold: float = None):
++    """Recompute and replace the dataframe's `is_profitable` column using the provided threshold.
++
++    This centralizes the dataset-level definition of profitability so all pages that
++    read `df_clean['is_profitable']` will reflect the classifier's chosen threshold.
++    If threshold is None, the function will try to obtain it from session state / trainer.
++    Returns a new dataframe with the updated `is_profitable` column.
++    """
++    df = df.copy()
++    try:
++        if threshold is None:
++            threshold = _get_profitability_threshold_for_plots()
++        # ensure ROI exists
++        if 'roi' not in df.columns:
++            if 'revenue' in df.columns and 'budget' in df.columns:
++                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
++            else:
++                # cannot compute ROI, set all to not profitable
++                df['is_profitable'] = 0
++                return df
++
++        # compute binary label using threshold
++        df['is_profitable'] = (df['roi'] >= float(threshold)).astype(int)
++    except Exception:
++        # on any error, do not change the dataframe but ensure column exists
++        if 'is_profitable' not in df.columns:
++            df['is_profitable'] = 0
++    return df
+     
+ 
+ 
+@@ -308,81 +401,139 @@ def show_prediction_page(df_clean, df_genres):
+             # Create features for prediction
+             X_pred = st.session_state.feature_engineer.create_prediction_features(movie_data)
+             
+-            # Make prediction (the trainer returns predictions in the original units of the trained target)
+-            pred_val = st.session_state.model_trainer.predict_roi(X_pred)[0]
+-
+-            target_col = st.session_state.feature_engineer.target_column if hasattr(st.session_state, 'feature_engineer') else 'roi'
+-            if target_col == 'roi':
+-                predicted_roi = pred_val
+-                # Calculate predicted revenue
+-                predicted_revenue = budget * (1 + predicted_roi)
++            # Make prediction. If the trained model is a profitability classifier, call its classifier predict method.
++            from models.model_trainer import ProfitabilityModelTrainer
++
++            if st.session_state.get('trained_target_type') == 'profitability' or isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer):
++                pred_class = st.session_state.model_trainer.predict_profitability(X_pred)[0]
++                # probability (if available)
++                proba = None
++                try:
++                    proba = st.session_state.model_trainer.predict_proba(X_pred)
++                    proba = float(proba[0]) if proba is not None else None
++                except Exception:
++                    proba = None
++
++                # For classifier we don't have ROI/revenue predictions
++                predicted_roi = None
++                predicted_revenue = None
++                predicted_profit = None
+             else:
+-                # target is revenue
+-                predicted_revenue = pred_val
+-                # compute ROI from predicted revenue if budget available
+-                predicted_roi = (predicted_revenue - budget) / budget if budget and budget > 0 else np.nan
++                # Regression ROI/revenue model
++                pred_val = st.session_state.model_trainer.predict_roi(X_pred)[0]
+ 
+-            predicted_profit = predicted_revenue - budget
++                target_col = st.session_state.feature_engineer.target_column if hasattr(st.session_state, 'feature_engineer') else 'roi'
++                if target_col == 'roi':
++                    predicted_roi = pred_val
++                    # Calculate predicted revenue
++                    predicted_revenue = budget * (1 + predicted_roi)
++                else:
++                    # target is revenue
++                    predicted_revenue = pred_val
++                    # compute ROI from predicted revenue if budget available
++                    predicted_roi = (predicted_revenue - budget) / budget if budget and budget > 0 else np.nan
++
++                predicted_profit = predicted_revenue - budget
+             
+             # Display results
+             st.success("✅ Prediction completed!")
+             
+             col1, col2, col3 = st.columns(3)
+-            
+-            with col1:
+-                # Show primary predicted value depending on trained target
+-                if target_col == 'roi':
+-                    title = 'Predicted ROI'
+-                    value_html = f"{predicted_roi:.2f} ({predicted_roi*100:.1f}%)"
+-                    color = 'green' if predicted_roi > 0 else 'red'
++
++            # If classifier was used, show binary prediction and probability (if available)
++            from models.model_trainer import ProfitabilityModelTrainer
++            if st.session_state.get('trained_target_type') == 'profitability' or isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer):
++                is_profitable = bool(pred_class)
++                with col1:
++                    title = 'Predicted Profitability'
++                    value_html = f"Profitable (1)" if is_profitable else "Not profitable (0)"
++                    color = 'green' if is_profitable else 'red'
++                    st.markdown(f"""
++                    <div class="prediction-card">
++                        <h3>{title}</h3>
++                        <h2 style="color: {color};">{value_html}</h2>
++                    </div>
++                    """, unsafe_allow_html=True)
++
++                with col2:
++                    prob_str = f"{proba*100:.1f}%" if proba is not None else "N/A"
++                    st.markdown(f"""
++                    <div class="prediction-card">
++                        <h3>Probability (profitable)</h3>
++                        <h2 style="color: #1f77b4;">{prob_str}</h2>
++                    </div>
++                    """, unsafe_allow_html=True)
++
++                with col3:
++                    thr = getattr(st.session_state.model_trainer, 'threshold', 2.0)
++                    st.markdown(f"""
++                    <div class="prediction-card">
++                        <h3>Threshold</h3>
++                        <h2 style="color: #333;">ROI ≥ {thr:.2f}</h2>
++                    </div>
++                    """, unsafe_allow_html=True)
++
++                # Interpretation
++                st.subheader("📊 Prediction Interpretation")
++                if is_profitable:
++                    st.success(f"🎉 This movie is predicted to be **profitable** under the ROI ≥ {thr:.2f} rule.")
+                 else:
+-                    title = 'Predicted Revenue'
+-                    value_html = f"${predicted_revenue:,.0f}"
+-                    color = '#1f77b4'
+-
+-                st.markdown(f"""
+-                <div class="prediction-card">
+-                    <h3>{title}</h3>
+-                    <h2 style="color: {color};">
+-                        {value_html}
+-                    </h2>
+-                </div>
+-                """, unsafe_allow_html=True)
+-            
+-            with col2:
+-                st.markdown(f"""
+-                <div class="prediction-card">
+-                    <h3>Predicted Revenue</h3>
+-                    <h2 style="color: #1f77b4;">
+-                        ${predicted_revenue:,.0f}
+-                    </h2>
+-                </div>
+-                """, unsafe_allow_html=True)
+-            
+-            with col3:
+-                st.markdown(f"""
+-                <div class="prediction-card">
+-                    <h3>Predicted Profit</h3>
+-                    <h2 style="color: {'green' if predicted_profit > 0 else 'red'};">
+-                        ${predicted_profit:,.0f}
+-                    </h2>
+-                </div>
+-                """, unsafe_allow_html=True)
+-            
+-            # Interpretation
+-            st.subheader("📊 Prediction Interpretation")
+-            
+-            if predicted_roi > 0:
+-                st.success(f"🎉 This movie is predicted to be **profitable** with a {predicted_roi*100:.1f}% return on investment!")
++                    st.error(f"📉 This movie is predicted to be **not profitable** under the ROI ≥ {thr:.2f} rule.")
++
+             else:
+-                st.error(f"📉 This movie is predicted to be **unprofitable** with a {predicted_roi*100:.1f}% return on investment.")
+-            
+-            # Confidence interval (simplified)
+-            confidence_interval = 0.2  # 20% margin of error
+-            lower_bound = predicted_roi * (1 - confidence_interval)
+-            upper_bound = predicted_roi * (1 + confidence_interval)
+-            
+-            st.info(f"📈 **Confidence Interval**: {lower_bound:.2f} to {upper_bound:.2f} ROI (±{confidence_interval*100:.0f}%)")
++                with col1:
++                    # Show primary predicted value depending on trained target
++                    if target_col == 'roi':
++                        title = 'Predicted ROI'
++                        value_html = f"{predicted_roi:.2f} ({predicted_roi*100:.1f}%)"
++                        color = 'green' if predicted_roi > 0 else 'red'
++                    else:
++                        title = 'Predicted Revenue'
++                        value_html = f"${predicted_revenue:,.0f}"
++                        color = '#1f77b4'
++
++                    st.markdown(f"""
++                    <div class="prediction-card">
++                        <h3>{title}</h3>
++                        <h2 style="color: {color};">
++                            {value_html}
++                        </h2>
++                    </div>
++                    """, unsafe_allow_html=True)
++
++                with col2:
++                    st.markdown(f"""
++                    <div class="prediction-card">
++                        <h3>Predicted Revenue</h3>
++                        <h2 style="color: #1f77b4;">
++                            ${predicted_revenue:,.0f}
++                        </h2>
++                    </div>
++                    """, unsafe_allow_html=True)
++
++                with col3:
++                    st.markdown(f"""
++                    <div class="prediction-card">
++                        <h3>Predicted Profit</h3>
++                        <h2 style="color: {'green' if predicted_profit > 0 else 'red'};">
++                            ${predicted_profit:,.0f}
++                        </h2>
++                    </div>
++                    """, unsafe_allow_html=True)
++
++                # Interpretation
++                st.subheader("📊 Prediction Interpretation")
++                if predicted_roi > 0:
++                    st.success(f"🎉 This movie is predicted to be **profitable** with a {predicted_roi*100:.1f}% return on investment!")
++                else:
++                    st.error(f"📉 This movie is predicted to be **unprofitable** with a {predicted_roi*100:.1f}% return on investment.")
++
++                # Confidence interval (simplified)
++                confidence_interval = 0.2  # 20% margin of error
++                lower_bound = predicted_roi * (1 - confidence_interval)
++                upper_bound = predicted_roi * (1 + confidence_interval)
++
++                st.info(f"📈 **Confidence Interval**: {lower_bound:.2f} to {upper_bound:.2f} ROI (±{confidence_interval*100:.0f}%)")
+             
+         except Exception as e:
+             st.error(f"❌ Error making prediction: {str(e)}")
+@@ -424,18 +575,7 @@ def show_overview_analysis(df_clean):
+     tgt_col, tgt_label = _plot_target_selector("overview")
+ 
+     # Ensure the dataframe has the requested target column (derive if possible)
+-    def _ensure_target(df, tgt):
+-        df = df.copy()
+-        if tgt == 'revenue' and 'revenue' not in df.columns:
+-            if 'roi' in df.columns and 'budget' in df.columns:
+-                df['revenue'] = df['budget'] * (1 + df['roi'])
+-        if tgt == 'roi' and 'roi' not in df.columns:
+-            if 'revenue' in df.columns and 'budget' in df.columns:
+-                # avoid divide by zero
+-                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+-        return df
+-
+-    df_plot = _ensure_target(df_clean, tgt_col)
++    df_plot = _ensure_plot_target(df_clean, tgt_col)
+ 
+     col1, col2 = st.columns(2)
+     
+@@ -443,8 +583,9 @@ def show_overview_analysis(df_clean):
+         # Target distribution
+         tgt = tgt_col
+         label = tgt_label
++        df_hist = _ensure_plot_target(df_clean, tgt)
+         fig_target = px.histogram(
+-            df_clean, x=tgt, nbins=50,
++            df_hist, x=tgt, nbins=50,
+             title=f"{label} Distribution",
+             labels={tgt: label, 'count': 'Number of Movies'}
+         )
+@@ -452,10 +593,11 @@ def show_overview_analysis(df_clean):
+     
+     with col2:
+         # Budget vs selected target
++        y_label = f"{tgt_label} (USD)" if tgt_col == 'revenue' else f"{tgt_label}"
+         fig_budget = px.scatter(
+             df_plot, x='budget', y=tgt_col,
+             title=f"Budget vs {tgt_label}",
+-            labels={'budget': 'Budget (USD)', tgt_col: f'{tgt_label} ({"USD" if tgt_col=="revenue" else "ratio"})'},
++            labels={'budget': 'Budget (USD)', tgt_col: y_label},
+             opacity=0.6
+         )
+         fig_budget.update_layout(xaxis_type="log")
+@@ -481,18 +623,7 @@ def show_financial_analysis(df_clean):
+     # Per-plot target override
+     tgt_col, tgt_label = _plot_target_selector("financial")
+ 
+-    # Ensure target column exists for plotting
+-    def _ensure_target(df, tgt):
+-        df = df.copy()
+-        if tgt == 'revenue' and 'revenue' not in df.columns:
+-            if 'roi' in df.columns and 'budget' in df.columns:
+-                df['revenue'] = df['budget'] * (1 + df['roi'])
+-        if tgt == 'roi' and 'roi' not in df.columns:
+-            if 'revenue' in df.columns and 'budget' in df.columns:
+-                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+-        return df
+-
+-    df_plot = _ensure_target(df_clean, tgt_col)
++    df_plot = _ensure_plot_target(df_clean, tgt_col)
+ 
+     col1, col2 = st.columns(2)
+     
+@@ -508,10 +639,11 @@ def show_financial_analysis(df_clean):
+     
+     with col2:
+         # Selected target distribution
++        ylab = f"{tgt_label} (USD)" if tgt_col == 'revenue' else f"{tgt_label}"
+         fig_target = px.box(
+             df_plot, y=tgt_col,
+             title=f"{tgt_label} Distribution",
+-            labels={tgt_col: f"{tgt_label} ({'USD' if tgt_col=='revenue' else 'ratio'})"}
++            labels={tgt_col: ylab}
+         )
+         if tgt_col == 'revenue':
+             fig_target.update_layout(yaxis_type="log")
+@@ -563,19 +695,8 @@ def show_genre_analysis(df_clean):
+     )
+     st.plotly_chart(fig_genres, width="stretch")
+     
+-    # Genre vs selected target
+-    # Ensure target available
+-    def _ensure_target(df, tgt):
+-        df = df.copy()
+-        if tgt == 'revenue' and 'revenue' not in df.columns:
+-            if 'roi' in df.columns and 'budget' in df.columns:
+-                df['revenue'] = df['budget'] * (1 + df['roi'])
+-        if tgt == 'roi' and 'roi' not in df.columns:
+-            if 'revenue' in df.columns and 'budget' in df.columns:
+-                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+-        return df
+-
+-    df_plot = _ensure_target(df_clean, tgt_col)
++    # Genre vs selected target: ensure target column exists
++    df_plot = _ensure_plot_target(df_clean, tgt_col)
+     genre_roi = []
+     for genre in genre_counts.index:
+         genre_movies = df_plot[df_plot['genres'].str.contains(genre, na=False)]
+@@ -605,17 +726,7 @@ def show_temporal_analysis(df_clean):
+     # Per-plot target override
+     tgt_col, tgt_label = _plot_target_selector("temporal")
+ 
+-    def _ensure_target(df, tgt):
+-        df = df.copy()
+-        if tgt == 'revenue' and 'revenue' not in df.columns:
+-            if 'roi' in df.columns and 'budget' in df.columns:
+-                df['revenue'] = df['budget'] * (1 + df['roi'])
+-        if tgt == 'roi' and 'roi' not in df.columns:
+-            if 'revenue' in df.columns and 'budget' in df.columns:
+-                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+-        return df
+-
+-    df_plot = _ensure_target(df_clean, tgt_col)
++    df_plot = _ensure_plot_target(df_clean, tgt_col)
+     
+     # Movies by year
+     yearly_counts = df_clean.groupby('release_year').size().reset_index(name='count')
+@@ -648,17 +759,7 @@ def show_country_analysis(df_clean):
+     # Per-plot target override
+     tgt_col, tgt_label = _plot_target_selector("country")
+ 
+-    def _ensure_target(df, tgt):
+-        df = df.copy()
+-        if tgt == 'revenue' and 'revenue' not in df.columns:
+-            if 'roi' in df.columns and 'budget' in df.columns:
+-                df['revenue'] = df['budget'] * (1 + df['roi'])
+-        if tgt == 'roi' and 'roi' not in df.columns:
+-            if 'revenue' in df.columns and 'budget' in df.columns:
+-                df['roi'] = (df['revenue'] - df['budget']) / df['budget']
+-        return df
+-
+-    df_plot = _ensure_target(df_clean, tgt_col)
++    df_plot = _ensure_plot_target(df_clean, tgt_col)
+     
+     # Top countries by movie count
+     country_counts = df_clean['main_country'].value_counts().head(15)
+@@ -708,39 +809,43 @@ def show_model_training_page(df_clean):
+     
+     with col2:
+         random_state = st.number_input("Random State", min_value=0, max_value=1000, value=42)
+-        # Target variable selection (ROI or Revenue)
+-        target_variable = st.selectbox("Target variable", ["ROI", "Revenue"], index=0, help="Choose whether to predict ROI or revenue directly")
+-        # Truncation percentiles (applies to the selected target)
+-        roi_lower_pct = st.number_input(
+-            f"{target_variable} lower percentile (0-100)", min_value=0, max_value=100, value=1, step=1, key="roi_lower_pct"
+-        )
+-        roi_upper_pct = st.number_input(
+-            f"{target_variable} upper percentile (0-100)", min_value=0, max_value=100, value=99, step=1, key="roi_upper_pct"
++        # Target variable selection: allow Profitability, ROI (regression) or Revenue (regression)
++        target_variable = st.selectbox(
++            "Target variable",
++            ["Profitability", "ROI", "Revenue"],
++            index=0,
++            help="Choose Profitability (classifier) or ROI/Revenue (regressor) as the training target"
+         )
+-        # Ensure FeatureEngineer uses the selected target column
+-        selected_col = 'roi' if target_variable == 'ROI' else 'revenue'
+-        st.session_state.feature_engineer.target_column = selected_col
+-        # Target transform selection (applies to the selected target variable)
+-        target_transform_label = st.selectbox(
+-            "Target transform",
+-            [
+-                'Raw',
+-                'Signed log (sign * log1p(abs(x)))',
+-                'Log + shift (log1p(x + shift))',
+-                'asinh (arcsinh)'
+-            ],
+-            index=1,
+-            help="Choose how to transform the target before training"
++        # Profitability threshold (ROI). Default 2.0 as requested: ROI >= threshold => profitable
++        profitability_threshold = st.number_input(
++            "Profitability threshold (ROI multiplier, e.g. 2 means ROI >= 2 considered profitable)",
++            min_value=0.0, value=2.0, step=0.1, format="%.2f"
+         )
++        # Map selected target to internal feature_engineer target column and trainer
++        from models.model_trainer import ProfitabilityModelTrainer, ROIModelTrainer
++        if target_variable == 'Profitability':
++            # For Profitability, base on ROI and derive binary labels using threshold
++            st.session_state.feature_engineer.target_column = 'roi'
++            st.session_state.model_trainer = ProfitabilityModelTrainer()
++            st.session_state.trained_target_type = 'profitability'
++            st.session_state.profitability_threshold = float(profitability_threshold)
++        elif target_variable == 'ROI':
++            st.session_state.feature_engineer.target_column = 'roi'
++            st.session_state.model_trainer = ROIModelTrainer()
++            st.session_state.trained_target_type = 'roi'
++            # clear any cached df_clean recomputed for profitability
++            if 'df_clean_cached' in st.session_state:
++                del st.session_state.df_clean_cached
++        elif target_variable == 'Revenue':
++            st.session_state.feature_engineer.target_column = 'revenue'
++            st.session_state.model_trainer = ROIModelTrainer()
++            st.session_state.trained_target_type = 'revenue'
++            # clear any cached df_clean recomputed for profitability
++            if 'df_clean_cached' in st.session_state:
++                del st.session_state.df_clean_cached
++        # For classification we do not apply target transforms or truncation
++        target_transform_label = None
+         transform_params = {}
+-        if target_transform_label.startswith('Log + shift'):
+-            # default shift: ensure positive inside log for min value in selected target
+-            selected_col = 'roi' if target_variable == 'ROI' else 'revenue'
+-            min_target = float(df_clean[selected_col].min()) if selected_col in df_clean.columns else 0.0
+-            default_shift = max(1e-6, -min_target + 1e-6) if min_target <= 0 else 0.0
+-            shift_val = st.number_input("Shift (added before log1p)", value=float(default_shift), step=0.1)
+-            transform_params['shift'] = float(shift_val)
+-        st.caption("Values outside the selected percentile range will be truncated to the percentile value before training.")
+     
+     # Debug features section
+     st.divider()
+@@ -916,36 +1021,76 @@ def show_model_training_page(df_clean):
+             try:
+                 # Prepare features
+                 df_features = st.session_state.feature_engineer.create_features(df_clean)
+-                X_train, X_test, y_train, y_test, feature_names = st.session_state.feature_engineer.prepare_modeling_data(
+-                    df_features, test_size=test_size, random_state=random_state
+-                )
+-                # Apply ROI truncation based on selected percentiles
+-                try:
+-                    # Validate percentiles
+-                    if roi_lower_pct >= roi_upper_pct:
+-                        st.error("❌ ROI lower percentile must be smaller than ROI upper percentile.")
+-                        return
+ 
+-                    lower_val = y_train.quantile(roi_lower_pct / 100.0)
+-                    upper_val = y_train.quantile(roi_upper_pct / 100.0)
+-
+-                    train_below = int((y_train < lower_val).sum())
+-                    train_above = int((y_train > upper_val).sum())
+-                    test_below = int((y_test < lower_val).sum())
+-                    test_above = int((y_test > upper_val).sum())
+-
+-                    # Clip target values to percentile bounds
+-                    y_train = y_train.clip(lower=lower_val, upper=upper_val)
+-                    y_test = y_test.clip(lower=lower_val, upper=upper_val)
+-
+-                    st.info(
+-                        f"{target_variable} truncation applied: {roi_lower_pct}th -> {lower_val:.3f}, {roi_upper_pct}th -> {upper_val:.3f}. "
+-                        f"Train clipped: below={train_below}, above={train_above}; Test clipped: below={test_below}, above={test_above}."
++                # Prepare target-specific training data
++                if target_variable == 'Profitability':
++                    # create a copy and compute 'is_profitable' using the chosen threshold
++                    df_train = df_features.copy()
++                    # Ensure ROI exists
++                    if 'roi' not in df_train.columns:
++                        df_train['roi'] = np.where(
++                            (df_train.get('revenue').notna()) & (df_train.get('budget') > 0),
++                            (df_train['revenue'] - df_train['budget']) / df_train['budget'],
++                            np.nan
++                        )
++                    df_train['is_profitable'] = (df_train['roi'] >= float(profitability_threshold)).astype(int)
++                    # set target column to the binary profitability label
++                    st.session_state.feature_engineer.target_column = 'is_profitable'
++                    X_train, X_test, y_train, y_test, feature_names = st.session_state.feature_engineer.prepare_modeling_data(
++                        df_train, test_size=test_size, random_state=random_state
++                    )
++                elif target_variable == 'ROI':
++                    # Prepare ROI regression training data and apply percentile truncation
++                    df_train = df_features.copy()
++                    if 'roi' not in df_train.columns:
++                        df_train['roi'] = np.where(
++                            (df_train.get('revenue').notna()) & (df_train.get('budget') > 0),
++                            (df_train['revenue'] - df_train['budget']) / df_train['budget'],
++                            np.nan
++                        )
++                    # Apply default percentile truncation (5th-95th) to reduce extreme outliers
++                    try:
++                        roi_vals = df_train['roi'].dropna().values
++                        if roi_vals.size > 0:
++                            lower, upper = np.percentile(roi_vals, [5, 95])
++                            n_outliers = int(((df_train['roi'] < lower) | (df_train['roi'] > upper)).sum())
++                            if n_outliers > 0:
++                                st.info(f"Clipped {n_outliers} ROI values to [{lower:.2f}, {upper:.2f}] for training")
++                            df_train['roi'] = df_train['roi'].clip(lower, upper)
++                    except Exception:
++                        pass
++                    st.session_state.feature_engineer.target_column = 'roi'
++                    X_train, X_test, y_train, y_test, feature_names = st.session_state.feature_engineer.prepare_modeling_data(
++                        df_train, test_size=test_size, random_state=random_state
++                    )
++                elif target_variable == 'Revenue':
++                    # Ensure revenue exists where possible (try to compute from roi + budget if available)
++                    df_train = df_features.copy()
++                    if 'revenue' not in df_train.columns and 'roi' in df_train.columns and 'budget' in df_train.columns:
++                        df_train['revenue'] = df_train['budget'] * (1 + df_train['roi'])
++                    if 'revenue' not in df_train.columns:
++                        st.warning("Revenue column not present for many rows; training will use only rows with non-null revenue.")
++                    # Apply default percentile truncation (5th-95th) to revenue target to reduce extreme outliers
++                    try:
++                        rev_vals = df_train['revenue'].dropna().values
++                        if rev_vals.size > 0:
++                            lower, upper = np.percentile(rev_vals, [5, 95])
++                            n_outliers = int(((df_train['revenue'] < lower) | (df_train['revenue'] > upper)).sum())
++                            if n_outliers > 0:
++                                st.info(f"Clipped {n_outliers} Revenue values to [{lower:.2f}, {upper:.2f}] for training")
++                            df_train['revenue'] = df_train['revenue'].clip(lower, upper)
++                    except Exception:
++                        pass
++                    st.session_state.feature_engineer.target_column = 'revenue'
++                    X_train, X_test, y_train, y_test, feature_names = st.session_state.feature_engineer.prepare_modeling_data(
++                        df_train, test_size=test_size, random_state=random_state
++                    )
++                else:
++                    # Fallback to ROI
++                    st.session_state.feature_engineer.target_column = 'roi'
++                    X_train, X_test, y_train, y_test, feature_names = st.session_state.feature_engineer.prepare_modeling_data(
++                        df_features, test_size=test_size, random_state=random_state
+                     )
+-                except Exception as e:
+-                    st.error(f"❌ Error applying {target_variable} truncation: {e}")
+-                    return
+-                    return
+                 
+                 # Apply feature selection if enabled
+                 if enable_feature_tinkering and st.session_state.selected_features:
+@@ -1010,38 +1155,95 @@ def show_model_training_page(df_clean):
+                 selected_transform = label_to_key.get(target_transform_label, 'signed_log1p')
+ 
+                 # record which target name the trainer is using (for UI labeling)
+-                st.session_state.model_trainer.target_name = selected_col
+-
+-                # Train model
+-                metrics = st.session_state.model_trainer.train_model(
+-                    X_train,
+-                    y_train,
+-                    X_test,
+-                    y_test,
+-                    optimize_hyperparams=optimize_hyperparams,
+-                    target_transform=selected_transform,
+-                    transform_params=transform_params or None,
+-                )
+-                
+-                st.success("✅ Model trained successfully!")
+-                
+-                # Display metrics
+-                st.subheader("📊 Model Performance")
+-                
+-                col1, col2, col3 = st.columns(3)
+-                
+-                with col1:
+-                    st.metric("R² Score (Test)", f"{metrics['test_r2']:.3f}")
+-                with col2:
+-                    st.metric("RMSE (Test)", f"{metrics['test_rmse']:.3f}")
+-                with col3:
+-                    st.metric("MAE (Test)", f"{metrics['test_mae']:.3f}")
+-                
+-                # Cross-validation scores
+-                cv_mean = metrics['cv_scores'].mean()
+-                cv_std = metrics['cv_scores'].std()
+-                
+-                st.metric("CV R² Score", f"{cv_mean:.3f} ± {cv_std:.3f}")
++                st.session_state.model_trainer.target_name = st.session_state.feature_engineer.target_column
++
++                # Train model (call appropriate signature depending on trainer type)
++                from models.model_trainer import ProfitabilityModelTrainer
++                if st.session_state.get('trained_target_type') == 'profitability' or isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer):
++                    metrics = st.session_state.model_trainer.train_model(
++                        X_train,
++                        y_train,
++                        X_test,
++                        y_test,
++                        threshold=float(profitability_threshold),
++                        optimize_hyperparams=optimize_hyperparams,
++                    )
++                    # Persist chosen threshold and canonical type in session state
++                    st.session_state.profitability_threshold = float(profitability_threshold)
++                    st.session_state.trained_target_type = 'profitability'
++                    st.success("✅ Classifier trained successfully!")
++
++                    # Recompute dataset-level `is_profitable` column immediately so
++                    # the training page reflects the canonical threshold right away.
++                    try:
++                        thr = st.session_state.get('profitability_threshold', None)
++                        df_clean = _recompute_dataset_is_profitable(df_clean, thr)
++                        # Cache recomputed dataframe so other pages can pick it up immediately
++                        try:
++                            st.session_state.df_clean_cached = df_clean.copy()
++                        except Exception:
++                            pass
++                        # Show updated profitability rate for quick verification
++                        prof_rate = df_clean['is_profitable'].mean() if 'is_profitable' in df_clean.columns else 0.0
++                        st.info(f"Dataset 'is_profitable' column updated using threshold ROI ≥ {thr:.2f}. Profitable rate: {prof_rate*100:.2f}%")
++                    except Exception:
++                        st.warning("Could not recompute dataset-level 'is_profitable' column immediately. It will be applied on next rerun.")
++
++                    # Display classification metrics
++                    st.subheader("📊 Classifier Performance")
++                    col1, col2, col3 = st.columns(3)
++                    with col1:
++                        st.metric("Test Accuracy", f"{metrics.get('test_accuracy', 0):.3f}")
++                    with col2:
++                        st.metric("Test Precision", f"{metrics.get('test_precision', 0):.3f}")
++                    with col3:
++                        st.metric("Test Recall", f"{metrics.get('test_recall', 0):.3f}")
++
++                    col4, col5 = st.columns(2)
++                    with col4:
++                        st.metric("Test F1", f"{metrics.get('test_f1', 0):.3f}")
++                    with col5:
++                        roc = metrics.get('test_roc_auc', None)
++                        st.metric("Test ROC AUC", f"{roc:.3f}" if roc is not None else "N/A")
++
++                else:
++                    # Regression training path
++                    metrics = st.session_state.model_trainer.train_model(
++                        X_train,
++                        y_train,
++                        X_test,
++                        y_test,
++                        optimize_hyperparams=optimize_hyperparams,
++                        target_transform=selected_transform,
++                        transform_params=transform_params or None,
++                    )
++                    st.success("✅ Model trained successfully!")
++
++                    # If we trained a regressor (ROI or Revenue), clear any cached
++                    # recomputed df_clean that was specific to profitability so pages
++                    # don't show inconsistent 'is_profitable' values.
++                    try:
++                        if 'df_clean_cached' in st.session_state:
++                            del st.session_state.df_clean_cached
++                    except Exception:
++                        pass
++
++                    # Display regression metrics
++                    st.subheader("📊 Model Performance")
++                    col1, col2, col3 = st.columns(3)
++                    with col1:
++                        st.metric("R² Score (Test)", f"{metrics.get('test_r2', 0):.3f}")
++                    with col2:
++                        st.metric("RMSE (Test)", f"{metrics.get('test_rmse', 0):.3f}")
++                    with col3:
++                        st.metric("MAE (Test)", f"{metrics.get('test_mae', 0):.3f}")
++
++                    # Cross-validation scores
++                    cv_scores = metrics.get('cv_scores', None)
++                    if cv_scores is not None:
++                        cv_mean = cv_scores.mean()
++                        cv_std = cv_scores.std()
++                        st.metric("CV R² Score", f"{cv_mean:.3f} ± {cv_std:.3f}")
+                 
+                 # Feature importance
+                 st.subheader("🔍 Feature Importance")
+@@ -1051,8 +1253,12 @@ def show_model_training_page(df_clean):
+                 
+                 # Save model option
+                 if st.button("💾 Save Model"):
+-                    model_path = "models/roi_model.pkl"
++                    from models.model_trainer import ProfitabilityModelTrainer
+                     os.makedirs("models", exist_ok=True)
++                    if isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer):
++                        model_path = "models/profitability_model.pkl"
++                    else:
++                        model_path = "models/roi_model.pkl"
+                     st.session_state.model_trainer.save_model(model_path)
+                 
+             except Exception as e:
+@@ -1119,9 +1325,32 @@ def show_model_performance_page():
+             with open("temp_model.pkl", "wb") as f:
+                 f.write(uploaded_file.getbuffer())
+             
+-            # Load model
+-            st.session_state.model_trainer.load_model("temp_model.pkl")
+-            
++            # Inspect the model file to determine its type, then instantiate and load into session
++            import joblib
++            model_data = joblib.load("temp_model.pkl")
++            from models.model_trainer import ProfitabilityModelTrainer, ROIModelTrainer
++            # If the saved artifact contains a 'threshold' key we treat it as the classifier
++            if isinstance(model_data, dict) and 'threshold' in model_data:
++                st.session_state.model_trainer = ProfitabilityModelTrainer()
++                st.session_state.model_trainer.load_model("temp_model.pkl")
++                st.session_state.trained_target_type = 'profitability'
++                st.session_state.profitability_threshold = float(model_data.get('threshold', 2.0))
++                # Recompute dataset-level is_profitable immediately and cache it so other
++                # pages display the correct profitability definition right away.
++                try:
++                    df_movies_reload = load_movies_data()
++                    if df_movies_reload is not None:
++                        df_clean_cached = prepare_movies_for_modeling(df_movies_reload)
++                        df_clean_cached = _recompute_dataset_is_profitable(df_clean_cached, st.session_state.profitability_threshold)
++                        st.session_state.df_clean_cached = df_clean_cached
++                        st.info(f"Dataset 'is_profitable' recomputed using threshold ROI ≥ {st.session_state.profitability_threshold:.2f} and cached for display.")
++                except Exception:
++                    # Non-fatal: user can refresh to pick changes up
++                    st.warning("Could not recompute dataset-level 'is_profitable' immediately after model load. It will be applied on next rerun.")
++            else:
++                st.session_state.model_trainer = ROIModelTrainer()
++                st.session_state.model_trainer.load_model("temp_model.pkl")
++                st.session_state.trained_target_type = 'roi'
+             # Clean up
+             os.remove("temp_model.pkl")
+             
+@@ -1204,9 +1433,9 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
+                 st.write(f"**Genres:** {', '.join(baseline_genres)}")
+         
+     # Per-plot target selection (ROI or Revenue)
+-    plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="budget_plot_target")
+-    plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+-    plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
++        plot_choice = st.selectbox("Show plot as", ["Profitability"], index=0, key="budget_plot_target")
++        plot_col = 'is_profitable'
++        plot_label = 'Profitability'
+ 
+     # Generate budget range
+     budget_min = st.number_input("Min Budget", min_value=100000, value=100000, step=100000, key="budget_min")
+@@ -1223,14 +1452,23 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
+ 
+             try:
+                 X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+-                pred_raw = st.session_state.model_trainer.predict_roi(X_pred)[0]
++                from models.model_trainer import ProfitabilityModelTrainer
++                if st.session_state.get('trained_target_type') == 'profitability' or isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer):
++                    pred_raw = st.session_state.model_trainer.predict_profitability(X_pred)[0]
++                else:
++                    pred_raw = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                 roi_predictions.append(pred_raw)
+             except Exception as e:
+                 st.error(f"Error predicting for budget {budget}: {str(e)}")
+                 roi_predictions.append(None)
+ 
+     # Convert predictions to chosen plot target taking into account how the model was trained
+-    trained_target = tgt_col  # 'roi' or 'revenue' as used when training
++        from models.model_trainer import ProfitabilityModelTrainer
++        # Prefer canonical session flag if present, otherwise fall back to trainer type
++        if st.session_state.get('trained_target_type') == 'profitability':
++            trained_target = 'is_profitable'
++        else:
++            trained_target = 'is_profitable' if isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer) else tgt_col  # 'roi' or 'revenue' or 'is_profitable'
+     
+     # Debug: show what's happening
+     st.write(f"**Debug:** Model trained on: `{trained_target}`, Plotting: `{plot_col}`, Sample raw prediction: `{roi_predictions[0] if roi_predictions else 'N/A'}`")
+@@ -1245,6 +1483,14 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
+     elif trained_target == 'revenue' and plot_col == 'roi':
+         # convert revenue -> ROI per budget point: ROI = (revenue - budget) / budget
+         pred_vals = [np.nan if p is None or (isinstance(p, float) and np.isnan(p)) else (p - b) / b if b != 0 else np.nan for p, b in zip(roi_predictions, budgets)]
++    elif trained_target == 'roi' and plot_col == 'is_profitable':
++        # Binarize ROI predictions using threshold
++        threshold = _get_profitability_threshold_for_plots()
++        pred_vals = [np.nan if p is None else (1 if (not (isinstance(p, float) and np.isnan(p)) and p >= threshold) else 0) for p in roi_predictions]
++    elif trained_target == 'revenue' and plot_col == 'is_profitable':
++        # Convert revenue->ROI then binarize
++        threshold = _get_profitability_threshold_for_plots()
++        pred_vals = [np.nan if p is None else (1 if (not (isinstance(p, float) and np.isnan(p)) and ((p - b) / b if b != 0 else np.nan) >= threshold) else 0) for p, b in zip(roi_predictions, budgets)]
+     else:
+         pred_vals = [np.nan if p is None else p for p in roi_predictions]
+     
+@@ -1310,9 +1556,9 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
+         runtime_steps = st.slider("Number of points", min_value=10, max_value=50, value=50, key="runtime_steps")
+         
+         # Per-plot target selection (ROI or Revenue)
+-        plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="runtime_plot_target")
+-        plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+-        plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
++        plot_choice = st.selectbox("Show plot as", ["Profitability"], index=0, key="runtime_plot_target")
++        plot_col = 'is_profitable'
++        plot_label = 'Profitability'
+ 
+         runtimes = np.linspace(runtime_min, runtime_max, runtime_steps)
+         roi_preds = []
+@@ -1324,14 +1570,22 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
+ 
+                 try:
+                     X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+-                    pred_val = st.session_state.model_trainer.predict_roi(X_pred)[0]
++                    from models.model_trainer import ProfitabilityModelTrainer
++                    if st.session_state.get('trained_target_type') == 'profitability' or isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer):
++                        pred_val = st.session_state.model_trainer.predict_profitability(X_pred)[0]
++                    else:
++                        pred_val = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                     roi_preds.append(pred_val)
+                 except Exception as e:
+                     st.error(f"Error predicting for runtime {runtime}: {str(e)}")
+                     roi_preds.append(None)
+ 
+         # Convert to chosen plot target (use baseline budget when converting between ROI and Revenue)
+-        trained_target = tgt_col
++            from models.model_trainer import ProfitabilityModelTrainer
++            if st.session_state.get('trained_target_type') == 'profitability':
++                trained_target = 'is_profitable'
++            else:
++                trained_target = 'is_profitable' if isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer) else tgt_col
+         if trained_target == plot_col:
+             plot_vals = [np.nan if p is None else p for p in roi_preds]
+         elif trained_target == 'roi' and plot_col == 'revenue':
+@@ -1411,19 +1665,27 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
+ 
+                 try:
+                     X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+-                    pred = st.session_state.model_trainer.predict_roi(X_pred)[0]
++                    from models.model_trainer import ProfitabilityModelTrainer
++                    if st.session_state.get('trained_target_type') == 'profitability' or isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer):
++                        pred = st.session_state.model_trainer.predict_profitability(X_pred)[0]
++                    else:
++                        pred = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                     pred_vals.append(pred)
+                 except Exception as e:
+                     st.error(f"Error predicting for country {country}: {str(e)}")
+                     pred_vals.append(None)
+ 
+         # Per-plot target selection (ROI or Revenue)
+-        plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="country_plot_target")
+-        plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+-        plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
++        plot_choice = st.selectbox("Show plot as", ["Profitability"], index=0, key="country_plot_target")
++        plot_col = 'is_profitable'
++        plot_label = 'Profitability'
+ 
+         # Plot (replace None with NaN so plot handles missing values)
+-        trained_target = tgt_col
++        from models.model_trainer import ProfitabilityModelTrainer
++        if st.session_state.get('trained_target_type') == 'profitability':
++            trained_target = 'is_profitable'
++        else:
++            trained_target = 'is_profitable' if isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer) else tgt_col
+         if trained_target == plot_col:
+             y_vals = [np.nan if p is None else p for p in pred_vals]
+         elif trained_target == 'roi' and plot_col == 'revenue':
+@@ -1486,16 +1748,20 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
+ 
+                 try:
+                     X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+-                    pred = st.session_state.model_trainer.predict_roi(X_pred)[0]
++                    from models.model_trainer import ProfitabilityModelTrainer
++                    if st.session_state.get('trained_target_type') == 'profitability' or isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer):
++                        pred = st.session_state.model_trainer.predict_profitability(X_pred)[0]
++                    else:
++                        pred = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                     pred_vals.append(pred)
+                 except Exception as e:
+                     st.error(f"Error predicting for language {lang}: {str(e)}")
+                     pred_vals.append(None)
+ 
+         # Per-plot target selection (ROI or Revenue)
+-        plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="language_plot_target")
+-        plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+-        plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
++        plot_choice = st.selectbox("Show plot as", ["Profitability"], index=0, key="language_plot_target")
++        plot_col = 'is_profitable'
++        plot_label = 'Profitability'
+ 
+         # Plot
+         trained_target = tgt_col
+@@ -1559,15 +1825,19 @@ def show_sensitivity_analysis_page(df_clean, df_genres):
+ 
+                 try:
+                     X_pred = st.session_state.feature_engineer.create_prediction_features(movie)
+-                    pred = st.session_state.model_trainer.predict_roi(X_pred)[0]
++                    from models.model_trainer import ProfitabilityModelTrainer
++                    if st.session_state.get('trained_target_type') == 'profitability' or isinstance(st.session_state.model_trainer, ProfitabilityModelTrainer):
++                        pred = st.session_state.model_trainer.predict_profitability(X_pred)[0]
++                    else:
++                        pred = st.session_state.model_trainer.predict_roi(X_pred)[0]
+                     pred_vals.append(pred)
+-                except Exception as e:
++                except Exception:
+                     pred_vals.append(None)
+ 
+         # Per-plot target selection (ROI or Revenue)
+-        plot_choice = st.selectbox("Show plot as", ["ROI", "Revenue"], index=0, key="genre_plot_target")
+-        plot_col = 'revenue' if plot_choice == 'Revenue' else 'roi'
+-        plot_label = 'Revenue' if plot_choice == 'Revenue' else 'ROI'
++        plot_choice = st.selectbox("Show plot as", ["Profitability"], index=0, key="genre_plot_target")
++        plot_col = 'is_profitable'
++        plot_label = 'Profitability'
+ 
+         # Plot
+         trained_target = tgt_col
+diff --git a/streamlit_app/models/model_trainer.py b/streamlit_app/models/model_trainer.py
+index f7f049e..67dd4a0 100644
+--- a/streamlit_app/models/model_trainer.py
++++ b/streamlit_app/models/model_trainer.py
+@@ -8,6 +8,8 @@ import streamlit as st
+ from sklearn.ensemble import RandomForestRegressor
+ from sklearn.model_selection import GridSearchCV, cross_val_score
+ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
++from sklearn.ensemble import RandomForestClassifier
++from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+ import plotly.express as px
+ import plotly.graph_objects as go
+ from plotly.subplots import make_subplots
+@@ -381,3 +383,168 @@ class ROIModelTrainer:
+         }
+ 
+ 
++class ProfitabilityModelTrainer:
++    """
++    Random Forest classifier that predicts whether a movie is "profitable" given a threshold on ROI.
++    The trainer expects the FeatureEngineer to provide ROI values (feature_engineer.target_column should be 'roi').
++    """
++
++    def __init__(self):
++        self.model = None
++        self.feature_importance = None
++        self.training_metrics = {}
++        self.is_trained = False
++        self.threshold = 2.0
++
++    def _binarize_target(self, y, threshold: float):
++        # y can be a pandas Series or numpy array of ROI values
++        import numpy as _np
++        yarr = _np.array(y)
++        return (yarr >= float(threshold)).astype(int)
++
++    def train_model(self, X_train, y_train, X_test, y_test, threshold: float = 2.0, optimize_hyperparams: bool = True):
++        """
++        Train a RandomForestClassifier to predict profitability.
++
++        Args:
++            X_train, y_train, X_test, y_test: training / test data where y_* are ROI (continuous).
++            threshold: ROI threshold (>= threshold -> profitable)
++            optimize_hyperparams: whether to run a small grid search for classifier params
++
++        Returns:
++            dict: training metrics (accuracy, precision, recall, f1, roc_auc)
++        """
++        self.threshold = float(threshold)
++
++        # Detect whether y_train/y_test are already binary (0/1). If so, use them directly.
++        # Otherwise, binarize using the provided threshold.
++        import numpy as _np
++        def _is_binary(arr):
++            try:
++                vals = _np.unique(_np.array(arr))
++                return set(vals.tolist()).issubset({0, 1})
++            except Exception:
++                return False
++
++        if _is_binary(y_train) and _is_binary(y_test):
++            # Already binary labels
++            y_train_bin = _np.array(y_train).astype(int)
++            y_test_bin = _np.array(y_test).astype(int)
++        else:
++            # Binarize continuous ROI targets using threshold
++            y_train_bin = self._binarize_target(y_train, self.threshold)
++            y_test_bin = self._binarize_target(y_test, self.threshold)
++
++        if optimize_hyperparams:
++            st.info("🔍 Optimizing classifier hyperparameters...")
++            param_grid = {
++                'n_estimators': [50, 100, 200],
++                'max_depth': [5, 10, 15, None],
++                'min_samples_split': [2, 5, 10]
++            }
++            rf = RandomForestClassifier(random_state=42, n_jobs=-1)
++            grid = GridSearchCV(rf, param_grid, cv=3, scoring='f1', n_jobs=-1, verbose=0)
++            grid.fit(X_train, y_train_bin)
++            self.model = grid.best_estimator_
++            st.success(f"✅ Best params: {grid.best_params_}")
++            st.success(f"✅ Best CV f1: {grid.best_score_:.4f}")
++        else:
++            self.model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42, n_jobs=-1)
++            self.model.fit(X_train, y_train_bin)
++
++        # Predictions
++        y_train_pred = self.model.predict(X_train)
++        y_test_pred = self.model.predict(X_test)
++        y_test_proba = self.model.predict_proba(X_test)[:, 1] if hasattr(self.model, 'predict_proba') else None
++
++        # Metrics
++        metrics = {}
++        metrics['train_accuracy'] = accuracy_score(y_train_bin, y_train_pred)
++        metrics['test_accuracy'] = accuracy_score(y_test_bin, y_test_pred)
++        metrics['train_precision'] = precision_score(y_train_bin, y_train_pred, zero_division=0)
++        metrics['test_precision'] = precision_score(y_test_bin, y_test_pred, zero_division=0)
++        metrics['train_recall'] = recall_score(y_train_bin, y_train_pred, zero_division=0)
++        metrics['test_recall'] = recall_score(y_test_bin, y_test_pred, zero_division=0)
++        metrics['train_f1'] = f1_score(y_train_bin, y_train_pred, zero_division=0)
++        metrics['test_f1'] = f1_score(y_test_bin, y_test_pred, zero_division=0)
++        if y_test_proba is not None:
++            try:
++                metrics['test_roc_auc'] = roc_auc_score(y_test_bin, y_test_proba)
++            except Exception:
++                metrics['test_roc_auc'] = None
++        else:
++            metrics['test_roc_auc'] = None
++
++        self.training_metrics = metrics
++
++        # Feature importance
++        try:
++            self.feature_importance = pd.DataFrame({
++                'feature': X_train.columns,
++                'importance': self.model.feature_importances_
++            }).sort_values('importance', ascending=False)
++        except Exception:
++            self.feature_importance = None
++
++        self.is_trained = True
++        return self.training_metrics
++
++    def predict_profitability(self, X):
++        """Return binary predictions (0/1) for given features."""
++        if not self.is_trained:
++            raise ValueError("Model must be trained before making predictions")
++        preds = self.model.predict(X)
++        return preds.astype(int)
++
++    def predict_proba(self, X):
++        """Return probability for positive (profitable) class if available."""
++        if not self.is_trained:
++            raise ValueError("Model must be trained before making predictions")
++        if hasattr(self.model, 'predict_proba'):
++            return self.model.predict_proba(X)[:, 1]
++        else:
++            return None
++
++    def get_feature_importance_plot(self, top_n=20):
++        if self.feature_importance is None:
++            return None
++
++        top_features = self.feature_importance.head(top_n)
++        fig = px.bar(
++            top_features,
++            x='importance',
++            y='feature',
++            orientation='h',
++            title=f'Top {top_n} Feature Importance (Profitability)',
++            labels={'importance': 'Importance', 'feature': 'Feature'}
++        )
++        fig.update_layout(height=600, yaxis={'categoryorder': 'total ascending'})
++        return fig
++
++    def save_model(self, filepath):
++        if not self.is_trained:
++            raise ValueError("Model must be trained before saving")
++        model_data = {
++            'model': self.model,
++            'feature_importance': self.feature_importance,
++            'training_metrics': self.training_metrics,
++            'feature_columns': self.feature_importance['feature'].tolist() if self.feature_importance is not None else []
++        }
++        model_data['threshold'] = self.threshold
++        joblib.dump(model_data, filepath)
++        st.success(f"✅ Classifier saved to {filepath}")
++
++    def load_model(self, filepath):
++        try:
++            model_data = joblib.load(filepath)
++            self.model = model_data.get('model')
++            self.feature_importance = model_data.get('feature_importance')
++            self.training_metrics = model_data.get('training_metrics', {})
++            self.threshold = model_data.get('threshold', self.threshold)
++            self.is_trained = True
++            st.success(f"✅ Classifier loaded from {filepath}")
++        except Exception as e:
++            st.error(f"❌ Error loading classifier: {str(e)}")
++
++
++
