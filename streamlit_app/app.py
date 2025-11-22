@@ -2924,6 +2924,16 @@ def show_clustering_page():
         )
         return fig
     
+    # Allow user to disable shape encoding across clustering visualizations
+    shape_mode = st.selectbox(
+        "Shape encoding:",
+        ["Enabled (use shapes)", "Disabled (single symbol)"],
+        index=0,
+        key="clust_shapes_select",
+        help="Turn off shapes to use the same marker for all points (useful to avoid busy legends)."
+    )
+    shapes_enabled = (shape_mode == "Enabled (use shapes)")
+
     # Create tabs for different visualizations
     tab1, tab2, tab3, tab4 = st.tabs([
         "📊 Cluster Statistics",
@@ -3116,8 +3126,7 @@ def show_clustering_page():
             color='roi_mean',
             color_continuous_scale='RdYlGn',
             # Use different marker shapes per cluster to avoid relying solely on color gradients
-            symbol='cluster_id',
-            symbol_sequence=SYMBOL_SEQUENCE,
+            **({'symbol': 'cluster_id', 'symbol_sequence': SYMBOL_SEQUENCE} if shapes_enabled else {}),
             hover_data=['cluster_id', 'roi_median', 'vote_average_mean'],
             labels={'n_movies': 'Number of Movies', 'roi_mean': f'Average {tgt_label}', 'cluster_id': 'Cluster ID'},
             title=f'Cluster Size vs Average {tgt_label}'
@@ -3294,6 +3303,9 @@ def show_clustering_page():
                 # Color map must have string keys matching the cluster_label values
                 color_map = {str(cid): hsv_colors[i] for i, cid in enumerate(cluster_ids)}
 
+                # decide whether to encode cluster as shapes or not
+                symbol_args = {'symbol': 'cluster_label', 'symbol_sequence': SYMBOL_SEQUENCE} if shapes_enabled else {}
+
                 fig = px.scatter_3d(
                     df_viz,
                     x='x',
@@ -3301,19 +3313,28 @@ def show_clustering_page():
                     z='z',
                     color='cluster_label',
                     color_discrete_map=color_map,
-                    symbol='cluster_label',
-                    symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=['title', 'target_original', 'vote_average'],
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'z': 'UMAP Dimension 3', 'cluster_label': 'Cluster'},
                     title='Movie Clusters in 3D Space (colored by cluster)',
-                    category_orders={'cluster_label': cluster_label_order}
+                    category_orders={'cluster_label': cluster_label_order},
+                    **symbol_args
                 )
+
+                # if shapes disabled, force a single marker symbol
+                if not shapes_enabled:
+                    try:
+                        fig.update_traces(marker_symbol='circle')
+                    except Exception:
+                        pass
             else:
                 title_suffix = f"by cluster average {tgt_label}" if color_by == value_clusteravg else f"by {tgt_label}"
                 hover_data = ['title', 'cluster', 'vote_average', 'target_original']
                 if color_by == value_clusteravg:
                     hover_data.append('target_cluster_avg')
+
+                # decide whether to encode cluster as shapes or not for target-colored plots
+                symbol_args = {'symbol': 'cluster', 'symbol_sequence': SYMBOL_SEQUENCE} if shapes_enabled else {}
 
                 fig = px.scatter_3d(
                     df_viz,
@@ -3321,16 +3342,21 @@ def show_clustering_page():
                     y='y',
                     z='z',
                     color='target',
-                    symbol='cluster',
-                    symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=hover_data,
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'z': 'UMAP Dimension 3', 
                            'target': f'{tgt_label} (truncated)', 'target_original': f'{tgt_label} Individual', 
                            'target_cluster_avg': f'{tgt_label} Cluster Avg'},
                     title=f'Movie Clusters in 3D Space (colored {title_suffix})',
-                    color_continuous_scale='RdYlGn'
+                    color_continuous_scale='RdYlGn',
+                    **symbol_args
                 )
+
+                if not shapes_enabled:
+                    try:
+                        fig.update_traces(marker_symbol='circle')
+                    except Exception:
+                        pass
         else:
             # 2D visualization
             df_viz = pd.DataFrame({
@@ -3361,41 +3387,56 @@ def show_clustering_page():
                 # Color map must have string keys matching the cluster_label values
                 color_map = {str(cid): hsv_colors[i] for i, cid in enumerate(cluster_ids)}
 
+                # decide whether to encode cluster as shapes or not
+                symbol_args = {'symbol': 'cluster_label', 'symbol_sequence': SYMBOL_SEQUENCE} if shapes_enabled else {}
+
                 fig = px.scatter(
                     df_viz,
                     x='x',
                     y='y',
                     color='cluster_label',
                     color_discrete_map=color_map,
-                    symbol='cluster_label',
-                    symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=['title', 'target_original', 'vote_average'],
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 'cluster_label': 'Cluster'},
                     title='Movie Clusters in 2D Space (colored by cluster)',
-                    category_orders={'cluster_label': cluster_label_order}
+                    category_orders={'cluster_label': cluster_label_order},
+                    **symbol_args
                 )
+
+                if not shapes_enabled:
+                    try:
+                        fig.update_traces(marker_symbol='circle')
+                    except Exception:
+                        pass
             else:
                 title_suffix = f"by cluster average {tgt_label}" if color_by == value_clusteravg else f"by {tgt_label}"
                 hover_data = ['title', 'cluster', 'vote_average', 'target_original']
                 if color_by == value_clusteravg:
                     hover_data.append('target_cluster_avg')
 
+                symbol_args = {'symbol': 'cluster', 'symbol_sequence': SYMBOL_SEQUENCE} if shapes_enabled else {}
+
                 fig = px.scatter(
                     df_viz,
                     x='x',
                     y='y',
                     color='target',
-                    symbol='cluster',
-                    symbol_sequence=SYMBOL_SEQUENCE,
                     size='vote_average',
                     hover_data=hover_data,
                     labels={'x': 'UMAP Dimension 1', 'y': 'UMAP Dimension 2', 
                            'target': f'{tgt_label} (truncated)', 'target_original': f'{tgt_label} Individual',
                            'target_cluster_avg': f'{tgt_label} Cluster Avg'},
                     title=f'Movie Clusters in 2D Space (colored {title_suffix})',
-                    color_continuous_scale='RdYlGn'
+                    color_continuous_scale='RdYlGn',
+                    **symbol_args
                 )
+
+                if not shapes_enabled:
+                    try:
+                        fig.update_traces(marker_symbol='circle')
+                    except Exception:
+                        pass
         
         # Hide the built-in legend on the main chart and show two separate legend panels
         fig.update_layout(height=700, showlegend=False)
@@ -3409,16 +3450,23 @@ def show_clustering_page():
                 color_map = color_map if 'color_map' in locals() else {cid: c for cid, c in zip(cluster_ids, make_hsv_palette(len(cluster_ids)))}
 
                 color_legend_fig = _make_color_legend_fig(cluster_ids, color_map)
-                shape_legend_fig = _make_shape_legend_fig(cluster_ids, SYMBOL_SEQUENCE)
+                # only prepare shape legend if shapes are enabled
+                if shapes_enabled:
+                    shape_legend_fig = _make_shape_legend_fig(cluster_ids, SYMBOL_SEQUENCE)
 
                 # Display legends horizontally above the main chart
-                lcol, rcol = st.columns(2)
-                with lcol:
+                if shapes_enabled:
+                    lcol, rcol = st.columns(2)
+                    with lcol:
+                        st.markdown("**Color legend**")
+                        st.plotly_chart(color_legend_fig, use_container_width=True)
+                    with rcol:
+                        st.markdown("**Shape legend**")
+                        st.plotly_chart(shape_legend_fig, use_container_width=True)
+                else:
+                    # show only color legend full-width
                     st.markdown("**Color legend**")
                     st.plotly_chart(color_legend_fig, use_container_width=True)
-                with rcol:
-                    st.markdown("**Shape legend**")
-                    st.plotly_chart(shape_legend_fig, use_container_width=True)
             except Exception:
                 # If anything goes wrong building the separate legends, fall back to built-in legend
                 fig.update_layout(showlegend=True)
