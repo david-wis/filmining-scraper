@@ -72,12 +72,12 @@ def main():
     # When in Revenue page show its sections; when in Profitability show profitability sections
     # Revenue sections (legacy)
     revenue_sections = [
-        "🏠 Home", "🔮 Predict ROI", "📊 Data Analysis",
-        "🎯 Thematic Clustering", "🤖 Model Training", "📈 Model Performance", "🔬 Sensitivity Analysis"
+        "🏠 Home", "📊 Data Analysis", "🤖 Model Training", "📈 Model Performance","🔮 Predict ROI", 
+        "🔬 Sensitivity Analysis", "🎯 Thematic Clustering"
     ]
     # Profitability sections
     profitability_sections = [
-        "🏠 Profitability Overview", "🔮 Predict Profitability", "🤖 Train Classifier", "📈 Model Performance", "🔬 Sensitivity Analysis", "🎯 Thematic Clustering"
+        "🏠 Profitability Overview", "🤖 Train Classifier", "📈 Model Performance", "🔮 Predict Profitability", "🔬 Sensitivity Analysis", "🎯 Thematic Clustering"
     ]
 
     if top_section == "Revenue":
@@ -366,7 +366,7 @@ def show_profitability_training(df_clean):
 
     col1, col2 = st.columns(2)
     with col1:
-        threshold = st.number_input("Profitability threshold (ROI)", value=0.0, step=0.01, format="%.2f")
+        threshold = st.number_input("Profitability threshold (ROI)", value=2.0, step=0.01, format="%.2f")
         optimize_hyperparams = st.checkbox("Optimize Hyperparameters", value=True)
     with col2:
         test_size = st.slider("Test Size", 0.1, 0.4, 0.2, 0.05)
@@ -697,7 +697,7 @@ def show_profitability_sensitivity_page(df_clean, df_genres):
     # Budget Impact
     with analysis_tabs[0]:
         st.markdown("### How probability of profitability changes with budget")
-        budget_min = st.number_input("Min Budget", min_value=100000, value=100000, step=100000, key="prof_budget_min")
+        budget_min = st.number_input("Min Budget", min_value=100000, value=1000000, step=100000, key="prof_budget_min")
         budget_max = st.number_input("Max Budget", min_value=budget_min, value=100000000, step=1000000, key="prof_budget_max")
         budget_steps = st.slider("Number of points", min_value=10, max_value=200, value=100, key="prof_budget_steps")
 
@@ -1295,13 +1295,13 @@ def show_model_training_page(df_clean):
     with col2:
         random_state = st.number_input("Random State", min_value=0, max_value=1000, value=42)
         # Target variable selection (ROI or Revenue)
-        target_variable = st.selectbox("Target variable", ["ROI", "Revenue"], index=0, help="Choose whether to predict ROI or revenue directly")
+        target_variable = st.selectbox("Target variable", ["Revenue", "ROI"], index=0, help="Choose whether to predict ROI or revenue directly")
         # Truncation percentiles (applies to the selected target)
         roi_lower_pct = st.number_input(
-            f"{target_variable} lower percentile (0-100)", min_value=0, max_value=100, value=1, step=1, key="roi_lower_pct"
+            f"{target_variable} lower percentile (0-100)", min_value=0, max_value=100, value=0, step=1, key="roi_lower_pct"
         )
         roi_upper_pct = st.number_input(
-            f"{target_variable} upper percentile (0-100)", min_value=0, max_value=100, value=99, step=1, key="roi_upper_pct"
+            f"{target_variable} upper percentile (0-100)", min_value=0, max_value=100, value=95, step=1, key="roi_upper_pct"
         )
         # Ensure FeatureEngineer uses the selected target column
         selected_col = 'roi' if target_variable == 'ROI' else 'revenue'
@@ -1315,7 +1315,7 @@ def show_model_training_page(df_clean):
                 'Log + shift (log1p(x + shift))',
                 'asinh (arcsinh)'
             ],
-            index=1,
+            index=0,
             help="Choose how to transform the target before training"
         )
         transform_params = {}
@@ -2734,7 +2734,7 @@ def show_clustering_page():
             "min_dist",
             min_value=0.0,
             max_value=1.0,
-            value=0.1,
+            value=0.25,
             step=0.05,
             help="Minimum distance in UMAP"
         )
@@ -3575,7 +3575,7 @@ def show_profitability_clustering_page():
     st.subheader("📥 Load Data")
     col1, col2 = st.columns(2)
     with col1:
-        sample_size = st.number_input("Number of movies to analyze", min_value=100, max_value=10000, value=3000, step=100)
+        sample_size = st.number_input("Number of movies to analyze", min_value=100, max_value=10000, value=10000, step=100)
     with col2:
         random_seed = st.number_input("Random seed", min_value=0, max_value=1000, value=42)
 
@@ -3609,8 +3609,8 @@ def show_profitability_clustering_page():
     st.subheader("⚙️ Clustering Configuration")
     col1, col2, col3 = st.columns(3)
     with col1:
-        umap_n_neighbors = st.slider("n_neighbors", 5, 50, 30)
-        umap_min_dist = st.slider("min_dist", 0.0, 1.0, 0.1, step=0.05)
+        umap_n_neighbors = st.slider("n_neighbors", 5, 50, 40)
+        umap_min_dist = st.slider("min_dist", 0.0, 1.0, 0.25, step=0.05)
         umap_n_components = st.selectbox("Reduction dimensions", [2, 3], index=0)
     with col2:
         min_cluster_size = st.slider("min_cluster_size", 5, 100, 20)
