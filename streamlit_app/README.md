@@ -113,41 +113,6 @@ The Random Forest model can be configured with:
 
 ## 📈 Model Performance
 
-The model typically achieves:
-- R² Score: 0.6-0.8 (depending on data quality)
-- RMSE: 1.5-2.5 ROI units
-- MAE: 1.0-1.8 ROI units
-
-## 🎭 Features Used for Prediction
-
-### Numerical Features
-- Budget (log-transformed)
-- Runtime
-- Vote average and count
-- Release year, month, quarter
-- Budget per minute
-
-### Categorical Features
-- Genres (one-hot encoded)
-- Main country (one-hot encoded)
-- Original language (one-hot encoded)
-- Movie status
-- Adult content flag
-
-### Engineered Features
-- Vote confidence (log-transformed vote count)
-- Rating-popularity score
-- Budget and runtime categories
-- Temporal features (decade, quarter)
-
-## 🔍 Data Quality
-
-The application applies data quality filters:
-- Minimum budget: $100,000 (removes data errors)
-- Valid ROI calculation
-- Complete release date information
-- Non-null essential fields
-
 ## 🚀 Deployment
 
 ### Local Development
@@ -169,40 +134,7 @@ EXPOSE 8501
 CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
 ```
 
-### Streamlit Cloud
-1. Push code to GitHub
-2. Connect to Streamlit Cloud
-3. Set environment variables
-4. Deploy
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
 
 ## 📝 License
 
 This project is licensed under the MIT License.
-
-## 🙏 Acknowledgments
-
-- TMDB (The Movie Database) for providing the movie data
-- Streamlit for the web framework
-- Scikit-learn for machine learning capabilities
-- Plotly for interactive visualizations
-
-## 📞 Support
-
-For questions or issues:
-1. Check the documentation
-2. Search existing issues
-3. Create a new issue with detailed information
-
----
-
-**Note**: This application is for educational and research purposes. Movie ROI predictions should not be used as the sole basis for investment decisions.
-
-
